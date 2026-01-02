@@ -8,13 +8,12 @@ const ig = @import("cimgui");
 const math = @import("lib/math.zig");
 const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
-const world = @import("lib/world.zig");
-const brush_mod = @import("lib/brush.zig");
+const collision = @import("lib/collision.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
-const AABB = brush_mod.AABB;
-const BrushWorld = world.BrushWorld;
+const AABB = collision.AABB;
+const BrushWorld = collision.BrushWorld;
 const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
 
 // Components
@@ -90,25 +89,25 @@ const GameResources = struct {
         const half_size = Vec3.scale(size, 0.5);
         
         // Create planes for a sloped brush (wedge shape)
-        var planes = try self.allocator.alloc(brush_mod.Plane, 5);
+        var planes = try self.allocator.alloc(collision.Plane, 5);
         defer self.allocator.free(planes);
         
         // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
-        planes[0] = brush_mod.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
+        planes[0] = collision.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
         
         // Sloped surface - normal points outward from the slope
         const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
         const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
-        planes[1] = brush_mod.Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
+        planes[1] = collision.Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
         
         // Side walls (normals point outward)
-        planes[2] = brush_mod.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
-        planes[3] = brush_mod.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
+        planes[2] = collision.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
+        planes[3] = collision.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
         
         // Back wall (normal points outward)
-        planes[4] = brush_mod.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
+        planes[4] = collision.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
         
-        const brush = try brush_mod.Brush.init(self.allocator, planes);
+        const brush = try collision.Brush.init(self.allocator, planes);
         try self.brush_world.addBrush(brush);
         
         // Add visual geometry using the generic convex hull generator
@@ -116,7 +115,7 @@ const GameResources = struct {
     }
     
     // Generic convex hull mesh generator for any brush
-    fn add_brush_visual_generic(self: *@This(), brush: brush_mod.Brush, color: [4]f32) !void {
+    fn add_brush_visual_generic(self: *@This(), brush: collision.Brush, color: [4]f32) !void {
         // For now, fall back to a simpler approach that works reliably
         // Generate faces directly from brush planes using bounds intersection
         
@@ -126,7 +125,7 @@ const GameResources = struct {
     }
     
     // Generate a face for a specific plane of the brush
-    fn addBrushPlaneFace(self: *@This(), brush: brush_mod.Brush, plane: brush_mod.Plane, color: [4]f32) !void {
+    fn addBrushPlaneFace(self: *@This(), brush: collision.Brush, plane: collision.Plane, color: [4]f32) !void {
         // Find the intersection of this plane with the brush bounds to create a face
         var face_vertices = std.ArrayListUnmanaged(Vec3){};
         defer face_vertices.deinit(self.allocator);
@@ -166,7 +165,7 @@ const GameResources = struct {
     }
     
     // Generate a properly clipped face for any plane
-    fn generateClippedFace(self: *@This(), brush: brush_mod.Brush, target_plane: brush_mod.Plane, face_vertices: *std.ArrayListUnmanaged(Vec3)) !void {
+    fn generateClippedFace(self: *@This(), brush: collision.Brush, target_plane: collision.Plane, face_vertices: *std.ArrayListUnmanaged(Vec3)) !void {
         // Start with a large polygon on the target plane, then clip it against all other planes
         
         // Create initial large quad on the target plane
@@ -213,7 +212,7 @@ const GameResources = struct {
     }
     
     // Clip a polygon by a plane using Sutherland-Hodgman algorithm
-    fn clipPolygonByPlane(self: *@This(), polygon: *std.ArrayListUnmanaged(Vec3), plane: brush_mod.Plane) !void {
+    fn clipPolygonByPlane(self: *@This(), polygon: *std.ArrayListUnmanaged(Vec3), plane: collision.Plane) !void {
         if (polygon.items.len == 0) return;
         
         var output = std.ArrayListUnmanaged(Vec3){};
@@ -226,10 +225,10 @@ const GameResources = struct {
         if (polygon.items.len == 0) return;
         
         var prev_vertex = polygon.items[polygon.items.len - 1];
-        var prev_inside = plane.distanceToPoint(prev_vertex) <= brush_mod.Plane.COLLISION_EPSILON;
+        var prev_inside = plane.distanceToPoint(prev_vertex) <= collision.Plane.COLLISION_EPSILON;
         
         for (polygon.items) |curr_vertex| {
-            const curr_inside = plane.distanceToPoint(curr_vertex) <= brush_mod.Plane.COLLISION_EPSILON;
+            const curr_inside = plane.distanceToPoint(curr_vertex) <= collision.Plane.COLLISION_EPSILON;
             
             if (curr_inside) {
                 if (!prev_inside) {
@@ -253,7 +252,7 @@ const GameResources = struct {
     }
     
     // Intersect an unbounded line with a plane
-    fn intersectLineWithPlaneUnbounded(self: *@This(), start: Vec3, end: Vec3, plane: brush_mod.Plane) ?Vec3 {
+    fn intersectLineWithPlaneUnbounded(self: *@This(), start: Vec3, end: Vec3, plane: collision.Plane) ?Vec3 {
         _ = self;
         const dir = Vec3.sub(end, start);
         const denom = Vec3.dot(plane.normal, dir);
