@@ -9,349 +9,292 @@ const math = @import("lib/math.zig");
 const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
 const bvh = @import("lib/bvh.zig");
-const movement = @import("lib/physics.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
 const AABB = bvh.AABB;
-
 const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
-const Brush = struct { 
-    box: AABB, 
-    col: [4]f32,
-    
-    fn get_aabb(self: Brush) AABB {
-        return self.box;
-    }
-};
 
 // Components
-const Physics = struct { 
-    pos: Vec3, 
-    vel: Vec3,
-    on_ground: bool = false,
-};
+const Transform = struct { pos: Vec3 = Vec3.zero() };
+const Physics = struct { vel: Vec3 = Vec3.zero(), on_ground: bool = false };
 const Input = struct { 
-    yaw: f32 = 0, 
-    pitch: f32 = 0, 
-    mdx: f32 = 0, 
-    mdy: f32 = 0, 
-    keys: packed struct { 
-        w: bool = false, 
-        a: bool = false, 
-        s: bool = false, 
-        d: bool = false, 
-        sp: bool = false 
-    } = .{}, 
+    yaw: f32 = 0, pitch: f32 = 0, mdx: f32 = 0, mdy: f32 = 0,
+    keys: packed struct { w: bool = false, a: bool = false, s: bool = false, d: bool = false, sp: bool = false } = .{}, 
     lock: bool = false 
 };
+const Audio = struct { timer: f32 = 0, active: bool = false };
 
-// Archetypes
-const Player = struct { physics: Physics, input: Input };
+// Archetype
+const Player = struct { transform: Transform, physics: Physics, input: Input, audio: Audio };
 
 // Registry
 const Registry = struct { players: ecs.List(Player) };
 
-// Resources - now contains everything that was in the global st
+// Resources
 const GameResources = struct {
-    delta_time: f32 = 0.0,
-    world: World,
-    renderer: Renderer = .{},
-    jump_sound: bool = false,
-    jump_timer: f32 = 0.0,
-    mem: std.mem.Allocator,
+    delta_time: f32 = 0,
+    allocator: std.mem.Allocator,
     player_entity: ecs.Entity(Player) = undefined,
-};
-
-const World = struct {
-    brushes: std.ArrayListUnmanaged(Brush) = .{},
-    collision_bvh: ?bvh.BVH(Brush, Brush.get_aabb) = null,
-    verts: std.ArrayListUnmanaged(Vertex) = .{}, 
-    inds: std.ArrayListUnmanaged(u16) = .{}, 
-    mem: std.mem.Allocator,
-
-    fn init(mem: std.mem.Allocator) World { return .{ .mem = mem }; }
     
-    fn deinit(w: *World) void { 
-        w.brushes.deinit(w.mem); 
-        if (w.collision_bvh) |*bvh_tree| bvh_tree.deinit();
-        w.verts.deinit(w.mem); 
-        w.inds.deinit(w.mem); 
+    // Rendering
+    pipeline: sg.Pipeline = undefined,
+    bindings: sg.Bindings = undefined,
+    pass_action: sg.PassAction = undefined,
+    vertex_count: u32 = 0,
+    
+    // Collision
+    bvh_tree: ?bvh.BVH(AABB, get_aabb) = null,
+    boxes: std.ArrayListUnmanaged(AABB) = .{},
+    
+    // Geometry
+    vertices: std.ArrayListUnmanaged(Vertex) = .{},
+    indices: std.ArrayListUnmanaged(u16) = .{},
+    
+    fn get_aabb(box: AABB) AABB { return box; }
+    
+    fn init(self: *@This(), allocator: std.mem.Allocator) void {
+        self.allocator = allocator;
+        self.boxes = .{};
+        self.vertices = .{};
+        self.indices = .{};
+        
+        // Init rendering
+        var layout = sg.VertexLayoutState{};
+        layout.attrs[0].format = .FLOAT3;
+        layout.attrs[1].format = .FLOAT4;
+        self.pipeline = sg.makePipeline(.{ 
+            .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), 
+            .layout = layout, .index_type = .UINT16, 
+            .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, 
+            .cull_mode = .FRONT 
+        });
+        self.pass_action = .{ .colors = .{ .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, .{}, .{}, .{}, .{}, .{}, .{}, .{} } };
     }
     
-    fn add(w: *World, pos: Vec3, size: Vec3, col: [4]f32) !void { 
-        const h = Vec3.scale(size, 0.5); 
-        try w.brushes.append(w.mem, .{ 
-            .box = .{ .min = Vec3.sub(pos, h), .max = Vec3.add(pos, h) }, 
-            .col = col 
-        }); 
+    fn deinit(self: *@This()) void {
+        self.boxes.deinit(self.allocator);
+        self.vertices.deinit(self.allocator);
+        self.indices.deinit(self.allocator);
+        if (self.bvh_tree) |*tree| tree.deinit();
     }
-
-    fn build(w: *World) !void {
-        if (w.collision_bvh) |*bvh_tree| bvh_tree.deinit();
-        if (w.brushes.items.len > 0) {
-            w.collision_bvh = try bvh.BVH(Brush, Brush.get_aabb).init(w.mem, w.brushes.items);
-        }
-    }
-
-    fn hit(w: *const World, box: AABB) bool {
-        if (w.collision_bvh) |*bvh_tree| {
-            return bvh_tree.intersect(box);
-        }
-        return false;
-    }
-
-    fn bake(w: *World) !void {
-        w.verts.clearRetainingCapacity(); 
-        w.inds.clearRetainingCapacity();
-        
-        const v_tab = [_][3]f32{ 
-            .{ 1,-1,-1}, .{-1,-1,-1}, .{-1, 1,-1}, .{ 1, 1,-1}, 
-            .{-1,-1, 1}, .{ 1,-1, 1}, .{ 1, 1, 1}, .{-1, 1, 1}, 
-            .{-1,-1,-1}, .{-1,-1, 1}, .{-1, 1, 1}, .{-1, 1,-1}, 
-            .{ 1,-1, 1}, .{ 1,-1,-1}, .{ 1, 1,-1}, .{ 1, 1, 1}, 
-            .{-1,-1, 1}, .{-1,-1,-1}, .{ 1,-1,-1}, .{ 1,-1, 1}, 
-            .{-1, 1,-1}, .{-1, 1, 1}, .{ 1, 1, 1}, .{ 1, 1,-1} 
-        };
-        
-        for (w.brushes.items) |b| {
-            const cen = Vec3.scale(Vec3.add(b.box.min, b.box.max), 0.5);
-            const ext = Vec3.scale(Vec3.sub(b.box.max, b.box.min), 0.5);
-            const base = @as(u16, @intCast(w.verts.items.len));
-            
-            for (v_tab) |v| {
-                var c = b.col; 
-                if (v[1] > 0.01) { 
-                    c[0]*=1.1; c[1]*=1.1; c[2]*=1.1; 
-                } else if (v[1] < -0.01) { 
-                    c[0]*=0.7; c[1]*=0.7; c[2]*=0.7; 
-                }
-                try w.verts.append(w.mem, .{ 
-                    .pos = .{ cen.data[0] + v[0]*ext.data[0], cen.data[1] + v[1]*ext.data[1], cen.data[2] + v[2]*ext.data[2] }, 
-                    .col = c 
-                });
-            }
-            
-            inline for (0..6) |f| 
-                for ([_]u16{0,1,2,0,2,3}) |q| 
-                    try w.inds.append(w.mem, @intCast(base + f*4 + q));
-        }
-    }
-};
-
-// Global collision function for physics (now uses the store)
-var game_store: *ecs.Store(Registry, GameResources) = undefined;
-
-fn world_collision_check(aabb: bvh.AABB) bool {
-    return game_store.resources.world.hit(aabb);
-}
-
-// Systems using the new ECS
-fn sys_PlayerUpdate(phy: []Physics, inp: []Input, resources: *GameResources) void {
-    const dt = resources.delta_time;
     
-    for (phy, inp) |*p, *i| {
-        // Update camera
-        i.yaw += i.mdx * 0.002; 
-        i.pitch = std.math.clamp(i.pitch + i.mdy * 0.002, -1.5, 1.5); 
-        i.mdx = 0; i.mdy = 0;
+    fn add_box(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
+        const half = Vec3.scale(size, 0.5);
+        const box = AABB{ .min = Vec3.sub(pos, half), .max = Vec3.add(pos, half) };
+        try self.boxes.append(self.allocator, box);
         
-        // Get input values
-        const input_forward: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
-        const input_strafe: f32 = if (i.keys.d) 1 else if (i.keys.a) -1 else 0;
-        const input_jump = i.keys.sp;
+        const base = @as(u16, @intCast(self.vertices.items.len));
+        const verts = [_][3]f32{ .{1,-1,-1}, .{-1,-1,-1}, .{-1,1,-1}, .{1,1,-1}, .{-1,-1,1}, .{1,-1,1}, .{1,1,1}, .{-1,1,1}, .{-1,-1,-1}, .{-1,-1,1}, .{-1,1,1}, .{-1,1,-1}, .{1,-1,1}, .{1,-1,-1}, .{1,1,-1}, .{1,1,1}, .{-1,-1,1}, .{-1,-1,-1}, .{1,-1,-1}, .{1,-1,1}, .{-1,1,-1}, .{-1,1,1}, .{1,1,1}, .{1,1,-1} };
         
-        // Simple Quake movement
-        movement.quake_movement(
-            &p.pos,
-            &p.vel,
-            &p.on_ground,
-            input_forward,
-            input_strafe,
-            input_jump,
-            i.yaw,
-            dt,
-            world_collision_check
-        );
-        
-        // Play jump sound
-        if (input_jump and p.on_ground) {
-            resources.jump_sound = true;
+        for (verts) |v| {
+            var c = color;
+            if (v[1] > 0) { c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; }
+            else if (v[1] < 0) { c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; }
+            try self.vertices.append(self.allocator, .{
+                .pos = .{ pos.data[0] + v[0]*half.data[0], pos.data[1] + v[1]*half.data[1], pos.data[2] + v[2]*half.data[2] },
+                .col = c,
+            });
         }
+        
+        inline for (0..6) |f| for ([_]u16{0,1,2,0,2,3}) |i| try self.indices.append(self.allocator, base + @as(u16, @intCast(f*4 + i)));
     }
-}
-
-fn get_view_matrix(phy: Physics, inp: Input) Mat4 {
-    const eye = Vec3.add(phy.pos, Vec3.new(0, 0.6, 0)); // Lower camera for better feel
-    const cy, const sy = .{ @cos(inp.yaw), @sin(inp.yaw) };
-    const cp, const sp = .{ @cos(inp.pitch), @sin(inp.pitch) };
-    return .{ .data = .{ cy, sy*sp, -sy*cp, 0, 0, cp, sp, 0, sy, -cy*sp, cy*cp, 0, -eye.data[0]*cy - eye.data[2]*sy, -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 1 } };
-}
-
-const Renderer = struct {
-    pip: sg.Pipeline = undefined, bind: sg.Bindings = undefined, cnt: u32 = 0, pass: sg.PassAction = undefined,
-    fn init(r: *Renderer, w: *const World) void {
-        var lay = sg.VertexLayoutState{}; lay.attrs[0].format = .FLOAT3; lay.attrs[1].format = .FLOAT4;
-        r.pip = sg.makePipeline(.{ .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), .layout = lay, .index_type = .UINT16, .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, .cull_mode = .FRONT });
-        r.pass = .{ .colors = .{ .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, .{}, .{}, .{}, .{}, .{}, .{}, .{} } };
-        r.upload(w);
-    }
-    fn upload(r: *Renderer, w: *const World) void {
-        if (r.bind.vertex_buffers[0].id != 0) sg.destroyBuffer(r.bind.vertex_buffers[0]);
-        if (r.bind.index_buffer.id != 0) sg.destroyBuffer(r.bind.index_buffer);
-        if (w.verts.items.len > 0) {
-            r.bind.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = w.verts.items.ptr, .size = w.verts.items.len * @sizeOf(Vertex) } });
-            r.bind.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = w.inds.items.ptr, .size = w.inds.items.len * @sizeOf(u16) } });
+    
+    fn build(self: *@This()) !void {
+        if (self.bvh_tree) |*tree| tree.deinit();
+        if (self.boxes.items.len > 0) self.bvh_tree = try bvh.BVH(AABB, get_aabb).init(self.allocator, self.boxes.items);
+        
+        if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
+        if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
+        if (self.vertices.items.len > 0) {
+            self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.vertices.items.ptr, .size = self.vertices.items.len * @sizeOf(Vertex) } });
+            self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.indices.items.ptr, .size = self.indices.items.len * @sizeOf(u16) } });
         }
-        r.cnt = @intCast(w.inds.items.len);
+        self.vertex_count = @intCast(self.indices.items.len);
     }
-    fn draw(r: *const Renderer, view: Mat4) void {
+    
+    fn hit(self: *const @This(), box: AABB) bool {
+        return if (self.bvh_tree) |*tree| tree.intersect(box) else false;
+    }
+    
+    fn render(self: *const @This(), view: Mat4) void {
         const mvp = Mat4.mul(math.perspective(90, 1.33, 0.1, 200), view);
-        sg.beginPass(.{ .action = r.pass, .swapchain = sokol.glue.swapchain() });
-        sg.applyPipeline(r.pip); sg.applyBindings(r.bind); sg.applyUniforms(0, sg.asRange(&mvp));
-        sg.draw(0, r.cnt, 1);
+        sg.beginPass(.{ .action = self.pass_action, .swapchain = sokol.glue.swapchain() });
+        sg.applyPipeline(self.pipeline);
+        sg.applyBindings(self.bindings);
+        sg.applyUniforms(0, sg.asRange(&mvp));
+        sg.draw(0, self.vertex_count, 1);
     }
 };
 
-// Global store - only one global needed now
+// Systems
+fn sys_input(inputs: []Input, resources: *GameResources) void {
+    _ = resources;
+    for (inputs) |*i| {
+        i.yaw += i.mdx * 0.002;
+        i.pitch = std.math.clamp(i.pitch + i.mdy * 0.002, -1.5, 1.5);
+        i.mdx = 0; i.mdy = 0;
+    }
+}
+
+fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, resources: *GameResources) void {
+    const dt = resources.delta_time;
+    const size = Vec3.new(0.98, 1.8, 0.98);
+    
+    for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
+        const fwd: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
+        const side: f32 = if (i.keys.d) 1 else if (i.keys.a) -1 else 0;
+        const jump = i.keys.sp;
+        
+        p.vel.data[1] -= 12.0 * dt;
+        if (jump and p.on_ground) { p.vel.data[1] = 4.0; a.timer = 0.15; a.active = true; }
+        
+        var dir = Vec3.zero();
+        if (side != 0) dir = Vec3.add(dir, Vec3.scale(Vec3.new(@cos(i.yaw), 0, @sin(i.yaw)), side));
+        if (fwd != 0) dir = Vec3.add(dir, Vec3.scale(Vec3.new(@sin(i.yaw), 0, -@cos(i.yaw)), fwd));
+        
+        const len = @sqrt(dir.data[0] * dir.data[0] + dir.data[2] * dir.data[2]);
+        if (len > 0.001) {
+            const wish = Vec3.scale(dir, 1.0 / len);
+            const speed = if (p.on_ground) 4.0 * len else @min(4.0 * len, 0.7);
+            const current = Vec3.dot(Vec3.new(p.vel.data[0], 0, p.vel.data[2]), wish);
+            const add = @max(0, speed - current);
+            if (add > 0) {
+                const accel = @min(70.0 * dt, add);
+                p.vel.data[0] += wish.data[0] * accel;
+                p.vel.data[2] += wish.data[2] * accel;
+            }
+        }
+        
+        if (p.on_ground) {
+            const speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
+            if (speed > 0.1) {
+                const factor = @max(0, speed - @max(speed, 0.1) * 5.0 * dt) / speed;
+                p.vel.data[0] *= factor; p.vel.data[2] *= factor;
+            } else { p.vel.data[0] = 0; p.vel.data[2] = 0; }
+        }
+        
+        var hit = false;
+        inline for (0..3) |axis| {
+            const old = t.pos.data[axis];
+            t.pos.data[axis] += p.vel.data[axis] * dt;
+            const half = Vec3.scale(size, 0.5);
+            const bbox = AABB{ .min = Vec3.sub(t.pos, half), .max = Vec3.add(t.pos, half) };
+            if (resources.hit(bbox)) { t.pos.data[axis] = old; p.vel.data[axis] = 0; hit = true; }
+        }
+        
+        p.on_ground = hit and p.vel.data[1] <= 0.01 and blk: {
+            const test_pos = Vec3.new(t.pos.data[0], t.pos.data[1] - 0.01, t.pos.data[2]);
+            const half = Vec3.scale(size, 0.5);
+            break :blk resources.hit(AABB{ .min = Vec3.sub(test_pos, half), .max = Vec3.add(test_pos, half) });
+        };
+    }
+}
+
+fn sys_render(transforms: []Transform, inputs: []Input, resources: *GameResources) void {
+    for (transforms, inputs) |t, i| {
+        const eye = Vec3.add(t.pos, Vec3.new(0, 0.6, 0));
+        const cy, const sy = .{ @cos(i.yaw), @sin(i.yaw) };
+        const cp, const sp = .{ @cos(i.pitch), @sin(i.pitch) };
+        const view = Mat4{ .data = .{ cy, sy*sp, -sy*cp, 0, 0, cp, sp, 0, sy, -cy*sp, cy*cp, 0, -eye.data[0]*cy - eye.data[2]*sy, -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 1 } };
+        resources.render(view);
+        break;
+    }
+}
+
+// Global state
 var store: ecs.Store(Registry, GameResources) = undefined;
+var initialized: bool = false;
 
 export fn init() void {
-    const mem = std.heap.c_allocator;
-    sg.setup(.{ .environment = sokol.glue.environment() }); 
-    saudio.setup(.{ .stream_cb = audio }); 
+    const allocator = std.heap.c_allocator;
+    sg.setup(.{ .environment = sokol.glue.environment() });
+    saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
     
-    var world = World.init(mem);
+    store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
+    store.resources.init(allocator);
     
-    // Build world
-    world.add(Vec3.new(0, -1, 0), Vec3.new(60, 2, 60), .{ 0.3, 0.3, 0.35, 1 }) catch {};
+    // World
+    store.resources.add_box(Vec3.new(0, -1, 0), Vec3.new(60, 2, 60), .{ 0.3, 0.3, 0.35, 1 }) catch {};
     const walls = [_][6]f32{ .{30,5,0,2,10,60}, .{-30,5,0,2,10,60}, .{0,5,30,60,10,2}, .{0,5,-30,60,10,2}, .{0,5,0,4,10,4} };
-    for (walls) |d| world.add(Vec3.new(d[0], d[1], d[2]), Vec3.new(d[3], d[4], d[5]), .{ 0.5, 0.4, 0.3, 1 }) catch {};
-    for (0..4) |i| world.add(Vec3.new(10 + @as(f32,@floatFromInt(i)) * 2, 0.5 + @as(f32,@floatFromInt(i)), 10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    world.add(Vec3.new(18, 3.5, 10), Vec3.new(8, 1, 8), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    world.build() catch {}; 
-    world.bake() catch {};
+    for (walls) |w| store.resources.add_box(Vec3.new(w[0], w[1], w[2]), Vec3.new(w[3], w[4], w[5]), .{ 0.5, 0.4, 0.3, 1 }) catch {};
+    for (0..4) |i| {
+        const f = @as(f32, @floatFromInt(i));
+        store.resources.add_box(Vec3.new(10 + f * 2, 0.5 + f, 10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    }
+    store.resources.add_box(Vec3.new(18, 3.5, 10), Vec3.new(8, 1, 8), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    store.resources.build() catch {};
     
-    // Initialize store with resources
-    store = ecs.Store(Registry, GameResources){ 
-        .registry = .{ .players = .{} },
-        .resources = .{
-            .delta_time = 0.0,
-            .world = world,
-            .renderer = .{},
-            .jump_sound = false,
-            .jump_timer = 0.0,
-            .mem = mem,
-            .player_entity = undefined,
-        },
-    };
-    
-    // Set global reference for collision function
-    game_store = &store;
-    
-    // Initialize renderer
-    store.resources.renderer.init(&store.resources.world);
-    
-    // Create player entity using the new ECS
-    store.resources.player_entity = store.create(Player, mem, .{ 
-        .physics = .{ .pos = Vec3.new(0, 5, -10), .vel = Vec3.zero() }, 
-        .input = .{} 
+    // Player
+    store.resources.player_entity = store.create(Player, allocator, .{
+        .transform = .{ .pos = Vec3.new(0, 5, -10) },
+        .physics = .{}, .input = .{}, .audio = .{},
     }) catch unreachable;
+    
+    initialized = true;
 }
 
 export fn frame() void {
-    // Update delta time
     store.resources.delta_time = @as(f32, @floatCast(sapp.frameDuration()));
-    
-    // Run systems using the new ECS
-    store.run(sys_PlayerUpdate);
+    store.run(sys_input);
+    store.run(sys_physics);
     
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
+    store.run(sys_render);
     
-    // Get player components using the new unified get() method
-    if (store.get(store.resources.player_entity.id, *Physics)) |player_physics| {
-        if (store.get(store.resources.player_entity.id, *Input)) |player_input| {
-            store.resources.renderer.draw(get_view_matrix(player_physics.*, player_input.*));
-        }
-    }
-    
-    const cx = @as(f32, @floatFromInt(sapp.width())) * 0.5; 
+    const cx = @as(f32, @floatFromInt(sapp.width())) * 0.5;
     const cy = @as(f32, @floatFromInt(sapp.height())) * 0.5;
     const dl = ig.igGetBackgroundDrawList();
     ig.ImDrawList_AddLine(dl, .{ .x = cx - 8, .y = cy }, .{ .x = cx + 8, .y = cy }, 0xFF00FF00);
     ig.ImDrawList_AddLine(dl, .{ .x = cx, .y = cy - 8 }, .{ .x = cx, .y = cy + 8 }, 0xFF00FF00);
     
-    simgui.render(); 
-    sg.endPass(); 
-    sg.commit();
+    simgui.render(); sg.endPass(); sg.commit();
 }
 
-export fn cleanup() void { 
-    store.resources.world.deinit(); 
-    store.registry.players.deinit(store.resources.mem); 
-    simgui.shutdown(); 
-    saudio.shutdown(); 
-    sg.shutdown(); 
+export fn cleanup() void {
+    initialized = false;
+    saudio.shutdown();
+    store.resources.deinit();
+    store.registry.players.deinit(store.resources.allocator);
+    simgui.shutdown(); sg.shutdown();
 }
 
 export fn event(e: [*c]const sapp.Event) void {
     _ = simgui.handleEvent(e.*);
-    
-    // Get player input using the new unified get() method
     const inp = store.get(store.resources.player_entity.id, *Input) orelse return;
     const d = e.*.type == .KEY_DOWN;
     
     switch (e.*.type) {
         .KEY_DOWN, .KEY_UP => switch (e.*.key_code) {
-            .W => inp.keys.w = d, 
-            .A => inp.keys.a = d, 
-            .S => inp.keys.s = d, 
-            .D => inp.keys.d = d, 
-            .SPACE => inp.keys.sp = d,
-            .ESCAPE => if (d and inp.lock) { 
-                inp.lock = false; 
-                sapp.showMouse(true); 
-                sapp.lockMouse(false); 
-            }, 
+            .W => inp.keys.w = d, .A => inp.keys.a = d, .S => inp.keys.s = d, .D => inp.keys.d = d, .SPACE => inp.keys.sp = d,
+            .ESCAPE => if (d and inp.lock) { inp.lock = false; sapp.showMouse(true); sapp.lockMouse(false); },
             else => {},
         },
-        .MOUSE_DOWN => if (e.*.mouse_button == .LEFT and !inp.lock) { 
-            inp.lock = true; 
-            sapp.showMouse(false); 
-            sapp.lockMouse(true); 
-        },
-        .MOUSE_MOVE => if (inp.lock) { 
-            inp.mdx += e.*.mouse_dx; 
-            inp.mdy += e.*.mouse_dy; 
-        }, 
+        .MOUSE_DOWN => if (e.*.mouse_button == .LEFT and !inp.lock) { inp.lock = true; sapp.showMouse(false); sapp.lockMouse(true); },
+        .MOUSE_MOVE => if (inp.lock) { inp.mdx += e.*.mouse_dx; inp.mdy += e.*.mouse_dy; },
         else => {},
     }
 }
 
 fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
-    for (0..@intCast(n)) |i| {
-        if (store.resources.jump_sound) { 
-            store.resources.jump_sound = false; 
-            store.resources.jump_timer = 0.15; 
+    if (!initialized) { for (0..@intCast(n * c)) |i| buf[i] = 0; return; }
+    
+    const sources = store.registry.players.items(.audio);
+    for (0..@intCast(n)) |f| {
+        var sample: f32 = 0;
+        for (sources) |*s| {
+            if (s.active and s.timer > 0) {
+                const t = 1.0 - s.timer / 0.15;
+                s.timer -= 1.0 / 44100.0;
+                sample += @sin((0.15 - s.timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
+                if (s.timer <= 0) s.active = false;
+            }
         }
-        const s: f32 = if (store.resources.jump_timer > 0) blk: {
-            const t = 1.0 - store.resources.jump_timer / 0.15; 
-            store.resources.jump_timer -= 1.0 / 44100.0;
-            break :blk @sin((0.15 - store.resources.jump_timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
-        } else 0;
-        for (0..@as(usize, @intCast(c))) |ch| buf[i * @as(usize, @intCast(c)) + ch] = s;
+        for (0..@as(usize, @intCast(c))) |ch| buf[f * @as(usize, @intCast(c)) + ch] = sample;
     }
 }
 
-pub fn main() void { 
-    sapp.run(.{ 
-        .init_cb = init, 
-        .frame_cb = frame, 
-        .cleanup_cb = cleanup, 
-        .event_cb = event, 
-        .width = 1024, 
-        .height = 768, 
-        .window_title = "FPS - New ECS" 
-    }); 
+pub fn main() void {
+    sapp.run(.{ .init_cb = init, .frame_cb = frame, .cleanup_cb = cleanup, .event_cb = event, .width = 1024, .height = 768, .window_title = "FPS" });
 }
