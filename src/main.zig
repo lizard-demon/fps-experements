@@ -66,7 +66,7 @@ const GameResources = struct {
             .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), 
             .layout = layout, .index_type = .UINT16, 
             .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, 
-            .cull_mode = .BACK 
+            .cull_mode = .NONE 
         });
         self.pass_action = .{ .colors = .{ .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, .{}, .{}, .{}, .{}, .{}, .{}, .{} } };
     }
@@ -82,7 +82,7 @@ const GameResources = struct {
         const brush = try self.brush_world.addBoxAndReturn(pos, size);
         
         // Add visual geometry using the brush bounds to ensure perfect alignment
-        try self.add_brush_visual(brush, color);
+        try self.add_brush_visual_generic(brush, color);
     }
     
     fn add_slope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
@@ -111,89 +111,212 @@ const GameResources = struct {
         const brush = try brush_mod.Brush.init(self.allocator, planes);
         try self.brush_world.addBrush(brush);
         
-        // Add visual geometry that matches the slope exactly
-        try self.add_slope_visual(center, size, angle_degrees, color);
+        // Add visual geometry using the generic convex hull generator
+        try self.add_brush_visual_generic(brush, color);
     }
     
-    // Generate visual mesh from brush planes using a simple approach
-    fn add_brush_visual(self: *@This(), brush: brush_mod.Brush, color: [4]f32) !void {
-        const min = brush.bounds.min;
-        const max = brush.bounds.max;
+    // Generic convex hull mesh generator for any brush
+    fn add_brush_visual_generic(self: *@This(), brush: brush_mod.Brush, color: [4]f32) !void {
+        // For now, fall back to a simpler approach that works reliably
+        // Generate faces directly from brush planes using bounds intersection
+        
+        for (brush.planes) |plane| {
+            try self.addBrushPlaneFace(brush, plane, color);
+        }
+    }
+    
+    // Generate a face for a specific plane of the brush
+    fn addBrushPlaneFace(self: *@This(), brush: brush_mod.Brush, plane: brush_mod.Plane, color: [4]f32) !void {
+        // Find the intersection of this plane with the brush bounds to create a face
+        var face_vertices = std.ArrayListUnmanaged(Vec3){};
+        defer face_vertices.deinit(self.allocator);
+        
+        // For all planes, use edge intersection method to ensure proper clipping
+        try self.generateClippedFace(brush, plane, &face_vertices);
+        
+        if (face_vertices.items.len < 3) return;
+        
+        // Ensure correct winding order based on plane normal
+        self.ensureCorrectWinding(face_vertices.items, plane.normal);
+        
+        // Add vertices to mesh
         const base = @as(u16, @intCast(self.vertices.items.len));
+        const center = self.calculateCenter(face_vertices.items);
         
-        const vertices = [_]Vec3{
-            Vec3.new(min.data[0], min.data[1], min.data[2]), Vec3.new(max.data[0], min.data[1], min.data[2]),
-            Vec3.new(max.data[0], min.data[1], max.data[2]), Vec3.new(min.data[0], min.data[1], max.data[2]),
-            Vec3.new(min.data[0], max.data[1], min.data[2]), Vec3.new(max.data[0], max.data[1], min.data[2]),
-            Vec3.new(max.data[0], max.data[1], max.data[2]), Vec3.new(min.data[0], max.data[1], max.data[2]),
-        };
-        
-        for (vertices) |v| {
+        for (face_vertices.items) |vertex| {
             var c = color;
-            if (v.data[1] <= (min.data[1] + max.data[1]) * 0.5) { c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; }
-            else { c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; }
-            try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = c });
+            // Simple lighting based on Y coordinate
+            if (vertex.data[1] <= center.data[1]) { 
+                c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; 
+            } else { 
+                c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; 
+            }
+            try self.vertices.append(self.allocator, .{ 
+                .pos = .{ vertex.data[0], vertex.data[1], vertex.data[2] }, 
+                .col = c 
+            });
         }
         
-        // Clockwise winding for back-face culling
-        const faces = [_][3]u16{
-            .{ 0, 2, 1 }, .{ 0, 3, 2 }, .{ 4, 5, 6 }, .{ 4, 6, 7 },
-            .{ 0, 1, 5 }, .{ 0, 5, 4 }, .{ 2, 7, 6 }, .{ 2, 6, 3 },
-            .{ 0, 4, 7 }, .{ 0, 7, 3 }, .{ 1, 2, 6 }, .{ 1, 6, 5 },
-        };
-        
-        for (faces) |face| {
-            for (face) |idx| try self.indices.append(self.allocator, base + idx);
+        // Triangulate the face (fan triangulation from first vertex)
+        for (1..face_vertices.items.len - 1) |i| {
+            try self.indices.append(self.allocator, base);
+            try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
+            try self.indices.append(self.allocator, base + @as(u16, @intCast(i + 1)));
         }
     }
     
-    fn add_slope_visual(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
-        const angle_rad = angle_degrees * std.math.pi / 180.0;
-        const half = Vec3.scale(size, 0.5);
-        const base = @as(u16, @intCast(self.vertices.items.len));
+    // Generate a properly clipped face for any plane
+    fn generateClippedFace(self: *@This(), brush: brush_mod.Brush, target_plane: brush_mod.Plane, face_vertices: *std.ArrayListUnmanaged(Vec3)) !void {
+        // Start with a large polygon on the target plane, then clip it against all other planes
         
-        const sin_a = @sin(angle_rad);
-        const cos_a = @cos(angle_rad);
+        // Create initial large quad on the target plane
+        var polygon = std.ArrayListUnmanaged(Vec3){};
+        defer polygon.deinit(self.allocator);
         
-        // Calculate geometry based on collision planes
-        const bottom_y = center.data[1] - half.data[1];
-        const slope_d = sin_a * center.data[0] + cos_a * (center.data[1] + half.data[1]);
+        // Find a reasonable size for the initial polygon based on brush bounds
+        const bounds_size = Vec3.sub(brush.bounds.max, brush.bounds.min);
+        const max_size = @max(@max(bounds_size.data[0], bounds_size.data[1]), bounds_size.data[2]) * 2;
         
-        const left_x = center.data[0] - half.data[0];
-        const right_x = center.data[0] + half.data[0];
-        const front_z = center.data[2] - half.data[2];
-        const back_z = center.data[2] + half.data[2];
+        // Create a local coordinate system for the plane
+        var tangent = Vec3.new(1, 0, 0);
+        if (@abs(Vec3.dot(target_plane.normal, tangent)) > 0.9) {
+            tangent = Vec3.new(0, 1, 0);
+        }
+        tangent = Vec3.normalize(Vec3.sub(tangent, Vec3.scale(target_plane.normal, Vec3.dot(tangent, target_plane.normal))));
+        const bitangent = Vec3.cross(target_plane.normal, tangent);
         
-        const left_slope_y = (slope_d - sin_a * left_x) / cos_a;
-        const right_slope_y = (slope_d - sin_a * right_x) / cos_a;
+        // Find a point on the plane (use brush center projected onto plane)
+        const brush_center = Vec3.scale(Vec3.add(brush.bounds.min, brush.bounds.max), 0.5);
+        const plane_point = Vec3.sub(brush_center, Vec3.scale(target_plane.normal, target_plane.distanceToPoint(brush_center)));
         
-        const vertices = [_]Vec3{
-            Vec3.new(left_x, bottom_y, front_z),   Vec3.new(right_x, bottom_y, front_z),
-            Vec3.new(right_x, bottom_y, back_z),   Vec3.new(left_x, bottom_y, back_z),
-            Vec3.new(left_x, left_slope_y, front_z),   Vec3.new(right_x, right_slope_y, front_z),
-            Vec3.new(right_x, right_slope_y, back_z),  Vec3.new(left_x, left_slope_y, back_z),
-        };
+        // Create initial large quad
+        const half_size = max_size * 0.5;
+        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, -half_size)), Vec3.scale(bitangent, -half_size)));
+        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, half_size)), Vec3.scale(bitangent, -half_size)));
+        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, half_size)), Vec3.scale(bitangent, half_size)));
+        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, -half_size)), Vec3.scale(bitangent, half_size)));
         
-        for (vertices) |v| {
-            var c = color;
-            if (v.data[1] <= center.data[1]) { c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; }
-            else { c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; }
-            try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = c });
+        // Clip against all other planes
+        for (brush.planes) |clip_plane| {
+            // Skip the target plane itself
+            if (Vec3.dot(clip_plane.normal, target_plane.normal) > 0.999 and 
+                @abs(clip_plane.distance - target_plane.distance) < 0.001) continue;
+            
+            try self.clipPolygonByPlane(&polygon, clip_plane);
+            if (polygon.items.len == 0) break; // Polygon completely clipped away
         }
         
-        // Clockwise winding for back-face culling
-        const faces = [_][3]u16{
-            .{ 0, 2, 1 }, .{ 0, 3, 2 }, .{ 4, 5, 6 }, .{ 4, 6, 7 },
-            .{ 0, 1, 5 }, .{ 0, 5, 4 }, .{ 2, 7, 6 }, .{ 2, 6, 3 },
-            .{ 0, 4, 7 }, .{ 0, 7, 3 }, .{ 1, 2, 6 }, .{ 1, 6, 5 },
-        };
-        
-        for (faces) |face| {
-            for (face) |idx| try self.indices.append(self.allocator, base + idx);
+        // Copy result to face_vertices
+        for (polygon.items) |vertex| {
+            try face_vertices.append(self.allocator, vertex);
         }
     }
     
-
+    // Clip a polygon by a plane using Sutherland-Hodgman algorithm
+    fn clipPolygonByPlane(self: *@This(), polygon: *std.ArrayListUnmanaged(Vec3), plane: brush_mod.Plane) !void {
+        if (polygon.items.len == 0) return;
+        
+        var output = std.ArrayListUnmanaged(Vec3){};
+        defer {
+            // Replace polygon contents with output
+            polygon.deinit(self.allocator);
+            polygon.* = output;
+        }
+        
+        if (polygon.items.len == 0) return;
+        
+        var prev_vertex = polygon.items[polygon.items.len - 1];
+        var prev_inside = plane.distanceToPoint(prev_vertex) <= brush_mod.Plane.COLLISION_EPSILON;
+        
+        for (polygon.items) |curr_vertex| {
+            const curr_inside = plane.distanceToPoint(curr_vertex) <= brush_mod.Plane.COLLISION_EPSILON;
+            
+            if (curr_inside) {
+                if (!prev_inside) {
+                    // Entering: add intersection point
+                    if (self.intersectLineWithPlaneUnbounded(prev_vertex, curr_vertex, plane)) |intersection| {
+                        try output.append(self.allocator, intersection);
+                    }
+                }
+                // Add current vertex
+                try output.append(self.allocator, curr_vertex);
+            } else if (prev_inside) {
+                // Exiting: add intersection point
+                if (self.intersectLineWithPlaneUnbounded(prev_vertex, curr_vertex, plane)) |intersection| {
+                    try output.append(self.allocator, intersection);
+                }
+            }
+            
+            prev_vertex = curr_vertex;
+            prev_inside = curr_inside;
+        }
+    }
+    
+    // Intersect an unbounded line with a plane
+    fn intersectLineWithPlaneUnbounded(self: *@This(), start: Vec3, end: Vec3, plane: brush_mod.Plane) ?Vec3 {
+        _ = self;
+        const dir = Vec3.sub(end, start);
+        const denom = Vec3.dot(plane.normal, dir);
+        
+        if (@abs(denom) < 1e-6) return null; // Line is parallel to plane
+        
+        const t = -(plane.distanceToPoint(start)) / denom;
+        return Vec3.add(start, Vec3.scale(dir, t));
+    }
+    
+    // Ensure vertices are wound correctly for the given normal
+    fn ensureCorrectWinding(self: *@This(), vertices: []Vec3, normal: Vec3) void {
+        if (vertices.len < 3) return;
+        
+        // Calculate the center
+        const center = self.calculateCenter(vertices);
+        
+        // Sort vertices counter-clockwise around the normal
+        self.sortVerticesCounterClockwise(vertices, normal, center);
+    }
+    
+    // Calculate center of vertices
+    fn calculateCenter(self: *@This(), vertices: []Vec3) Vec3 {
+        _ = self;
+        var center = Vec3.zero();
+        for (vertices) |vertex| {
+            center = Vec3.add(center, vertex);
+        }
+        return Vec3.scale(center, 1.0 / @as(f32, @floatFromInt(vertices.len)));
+    }
+    
+    // Sort vertices counter-clockwise around a plane normal
+    fn sortVerticesCounterClockwise(self: *@This(), vertices: []Vec3, normal: Vec3, center: Vec3) void {
+        _ = self;
+        // Create a local coordinate system for the plane
+        var tangent = Vec3.new(1, 0, 0);
+        if (@abs(Vec3.dot(normal, tangent)) > 0.9) {
+            tangent = Vec3.new(0, 1, 0);
+        }
+        tangent = Vec3.normalize(Vec3.sub(tangent, Vec3.scale(normal, Vec3.dot(tangent, normal))));
+        const bitangent = Vec3.cross(normal, tangent);
+        
+        // Sort by angle around the center
+        const Context = struct {
+            center: Vec3,
+            tangent: Vec3,
+            bitangent: Vec3,
+            
+            fn lessThan(ctx: @This(), a: Vec3, b: Vec3) bool {
+                const va = Vec3.sub(a, ctx.center);
+                const vb = Vec3.sub(b, ctx.center);
+                
+                const angle_a = std.math.atan2(Vec3.dot(va, ctx.bitangent), Vec3.dot(va, ctx.tangent));
+                const angle_b = std.math.atan2(Vec3.dot(vb, ctx.bitangent), Vec3.dot(vb, ctx.tangent));
+                
+                return angle_a < angle_b;
+            }
+        };
+        
+        const context = Context{ .center = center, .tangent = tangent, .bitangent = bitangent };
+        std.mem.sort(Vec3, vertices, context, Context.lessThan);
+    }
+    
     
     fn build(self: *@This()) !void {
         try self.brush_world.build();
