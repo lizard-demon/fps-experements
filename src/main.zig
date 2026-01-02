@@ -225,10 +225,10 @@ const GameResources = struct {
         if (polygon.items.len == 0) return;
         
         var prev_vertex = polygon.items[polygon.items.len - 1];
-        var prev_inside = plane.distanceToPoint(prev_vertex) <= collision.Plane.COLLISION_EPSILON;
+        var prev_inside = plane.distanceToPoint(prev_vertex) <= collision.COLLISION_EPSILON;
         
         for (polygon.items) |curr_vertex| {
-            const curr_inside = plane.distanceToPoint(curr_vertex) <= collision.Plane.COLLISION_EPSILON;
+            const curr_inside = plane.distanceToPoint(curr_vertex) <= collision.COLLISION_EPSILON;
             
             if (curr_inside) {
                 if (!prev_inside) {
@@ -257,7 +257,7 @@ const GameResources = struct {
         const dir = Vec3.sub(end, start);
         const denom = Vec3.dot(plane.normal, dir);
         
-        if (@abs(denom) < 1e-6) return null; // Line is parallel to plane
+        if (@abs(denom) < collision.COLLISION_EPSILON) return null; // Line is parallel to plane
         
         const t = -(plane.distanceToPoint(start)) / denom;
         return Vec3.add(start, Vec3.scale(dir, t));
@@ -353,7 +353,6 @@ fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, aud
     const dt = resources.delta_time;
     const size = Vec3.new(0.98, 1.8, 0.98);
     const player_aabb = AABB.fromCenterSize(Vec3.zero(), size);
-    const tolerance = 0.01;
     
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
         const fwd: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
@@ -403,38 +402,31 @@ fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, aud
             }
         }
         
-        // Movement with collision
+        // Movement with improved collision response
         const delta = Vec3.scale(p.vel, dt);
-        const old_pos = t.pos;
-        const new_pos = resources.brush_world.movePlayer(t.pos, delta, player_aabb);
+        const move_result = resources.brush_world.movePlayer(t.pos, delta, player_aabb);
         
-        // Update velocity based on actual movement (for sliding and bouncing)
-        const actual_delta = Vec3.sub(new_pos, old_pos);
+        // Apply velocity adjustments from collision system
+        p.vel = Vec3.add(p.vel, Vec3.scale(move_result.velocity_adjustment, 1.0 / dt));
         
-        // Only zero velocity if we completely failed to move in that direction
-        // This allows for sliding along walls and surfaces
-        if (@abs(delta.data[0]) > tolerance and @abs(actual_delta.data[0]) < tolerance * 0.1) {
-            p.vel.data[0] *= 0.1; // Reduce but don't completely zero for sliding
-        }
-        if (@abs(delta.data[1]) > tolerance and @abs(actual_delta.data[1]) < tolerance * 0.1) {
-            p.vel.data[1] = 0; // Always zero Y velocity when hitting ceiling/floor
-        }
-        if (@abs(delta.data[2]) > tolerance and @abs(actual_delta.data[2]) < tolerance * 0.1) {
-            p.vel.data[2] *= 0.1; // Reduce but don't completely zero for sliding
+        // Update ground state and handle ceiling hits
+        p.on_ground = move_result.on_ground;
+        if (move_result.hit_ceiling) {
+            p.vel.data[1] = @min(p.vel.data[1], 0); // Stop upward movement when hitting ceiling
         }
         
-        // Improved ground detection - check slightly below current position
-        const ground_check_distance = 0.05;
-        const ground_test_pos = Vec3.new(new_pos.data[0], new_pos.data[1] - ground_check_distance, new_pos.data[2]);
-        const ground_aabb = AABB{
-            .min = Vec3.add(ground_test_pos, player_aabb.min),
-            .max = Vec3.add(ground_test_pos, player_aabb.max)
-        };
+        // Apply some sliding friction when hitting walls
+        if (move_result.hit_wall and p.on_ground) {
+            const horizontal_speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
+            if (horizontal_speed > 0.1) {
+                const wall_friction: f32 = 2.0;
+                const factor = @max(0, horizontal_speed - horizontal_speed * wall_friction * dt) / horizontal_speed;
+                p.vel.data[0] *= factor;
+                p.vel.data[2] *= factor;
+            }
+        }
         
-        // We're on ground if there's collision below us and we're not moving up fast
-        p.on_ground = resources.brush_world.testCollision(ground_aabb) and p.vel.data[1] <= 0.1;
-        
-        t.pos = new_pos;
+        t.pos = move_result.position;
     }
 }
 
