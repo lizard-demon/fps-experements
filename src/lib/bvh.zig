@@ -101,8 +101,7 @@ pub fn BVH(comptime T: type, comptime get_aabb: fn(T) AABB) type {
         pub fn intersect(self: *const Self, query: AABB) bool {
             if (self.nodes.items.len == 0) return false;
             
-            // Use a reasonable stack size and handle overflow gracefully
-            var stack: [128]u32 = undefined;
+            var stack: [64]u32 = undefined;
             var sp: usize = 1;
             stack[0] = 0;
             
@@ -112,48 +111,18 @@ pub fn BVH(comptime T: type, comptime get_aabb: fn(T) AABB) type {
                 if (!query.hit(node.box)) continue;
                 
                 if (node.left == 0) {
-                    // Leaf node - check primitives
                     for (0..node.count) |i| {
                         if (query.hit(get_aabb(self.items[self.indices.items[node.first + i]]))) {
                             return true;
                         }
                     }
-                } else {
-                    // Internal node - add children to stack if there's room
-                    if (sp + 2 <= stack.len) {
-                        stack[sp] = node.left;
-                        stack[sp + 1] = node.right;
-                        sp += 2;
-                    } else {
-                        // Stack overflow - fall back to direct checking of remaining nodes
-                        // This is rare but ensures we don't miss collisions
-                        if (self.intersectDirect(query, node.left)) return true;
-                        if (self.intersectDirect(query, node.right)) return true;
-                    }
+                } else if (sp + 2 <= stack.len) {
+                    stack[sp] = node.left;
+                    stack[sp + 1] = node.right;
+                    sp += 2;
                 }
             }
             return false;
-        }
-        
-        // Fallback direct intersection check for stack overflow cases
-        fn intersectDirect(self: *const Self, query: AABB, node_idx: u32) bool {
-            if (node_idx >= self.nodes.items.len) return false;
-            
-            const node = self.nodes.items[node_idx];
-            if (!query.hit(node.box)) return false;
-            
-            if (node.left == 0) {
-                // Leaf node
-                for (0..node.count) |i| {
-                    if (query.hit(get_aabb(self.items[self.indices.items[node.first + i]]))) {
-                        return true;
-                    }
-                }
-                return false;
-            } else {
-                // Internal node
-                return self.intersectDirect(query, node.left) or self.intersectDirect(query, node.right);
-            }
         }
     };
 }

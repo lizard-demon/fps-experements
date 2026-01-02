@@ -66,7 +66,7 @@ const GameResources = struct {
             .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), 
             .layout = layout, .index_type = .UINT16, 
             .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, 
-            .cull_mode = .FRONT 
+            .cull_mode = .BACK 
         });
         self.pass_action = .{ .colors = .{ .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, .{}, .{}, .{}, .{}, .{}, .{}, .{} } };
     }
@@ -79,24 +79,10 @@ const GameResources = struct {
     
     fn add_box(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
         // Add brush to collision world
-        try self.brush_world.addBox(pos, size);
+        const brush = try self.brush_world.addBoxAndReturn(pos, size);
         
-        // Add visual geometry
-        const half = Vec3.scale(size, 0.5);
-        const base = @as(u16, @intCast(self.vertices.items.len));
-        const verts = [_][3]f32{ .{1,-1,-1}, .{-1,-1,-1}, .{-1,1,-1}, .{1,1,-1}, .{-1,-1,1}, .{1,-1,1}, .{1,1,1}, .{-1,1,1}, .{-1,-1,-1}, .{-1,-1,1}, .{-1,1,1}, .{-1,1,-1}, .{1,-1,1}, .{1,-1,-1}, .{1,1,-1}, .{1,1,1}, .{-1,-1,1}, .{-1,-1,-1}, .{1,-1,-1}, .{1,-1,1}, .{-1,1,-1}, .{-1,1,1}, .{1,1,1}, .{1,1,-1} };
-        
-        for (verts) |v| {
-            var c = color;
-            if (v[1] > 0) { c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; }
-            else if (v[1] < 0) { c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; }
-            try self.vertices.append(self.allocator, .{
-                .pos = .{ pos.data[0] + v[0]*half.data[0], pos.data[1] + v[1]*half.data[1], pos.data[2] + v[2]*half.data[2] },
-                .col = c,
-            });
-        }
-        
-        inline for (0..6) |f| for ([_]u16{0,1,2,0,2,3}) |i| try self.indices.append(self.allocator, base + @as(u16, @intCast(f*4 + i)));
+        // Add visual geometry using the brush bounds to ensure perfect alignment
+        try self.add_brush_visual(brush, color);
     }
     
     fn add_slope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
@@ -125,8 +111,40 @@ const GameResources = struct {
         const brush = try brush_mod.Brush.init(self.allocator, planes);
         try self.brush_world.addBrush(brush);
         
-        // Add visual geometry for the slope (wedge shape)
+        // Add visual geometry that matches the slope exactly
         try self.add_slope_visual(center, size, angle_degrees, color);
+    }
+    
+    // Generate visual mesh from brush planes using a simple approach
+    fn add_brush_visual(self: *@This(), brush: brush_mod.Brush, color: [4]f32) !void {
+        const min = brush.bounds.min;
+        const max = brush.bounds.max;
+        const base = @as(u16, @intCast(self.vertices.items.len));
+        
+        const vertices = [_]Vec3{
+            Vec3.new(min.data[0], min.data[1], min.data[2]), Vec3.new(max.data[0], min.data[1], min.data[2]),
+            Vec3.new(max.data[0], min.data[1], max.data[2]), Vec3.new(min.data[0], min.data[1], max.data[2]),
+            Vec3.new(min.data[0], max.data[1], min.data[2]), Vec3.new(max.data[0], max.data[1], min.data[2]),
+            Vec3.new(max.data[0], max.data[1], max.data[2]), Vec3.new(min.data[0], max.data[1], max.data[2]),
+        };
+        
+        for (vertices) |v| {
+            var c = color;
+            if (v.data[1] <= (min.data[1] + max.data[1]) * 0.5) { c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; }
+            else { c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; }
+            try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = c });
+        }
+        
+        // Clockwise winding for back-face culling
+        const faces = [_][3]u16{
+            .{ 0, 2, 1 }, .{ 0, 3, 2 }, .{ 4, 5, 6 }, .{ 4, 6, 7 },
+            .{ 0, 1, 5 }, .{ 0, 5, 4 }, .{ 2, 7, 6 }, .{ 2, 6, 3 },
+            .{ 0, 4, 7 }, .{ 0, 7, 3 }, .{ 1, 2, 6 }, .{ 1, 6, 5 },
+        };
+        
+        for (faces) |face| {
+            for (face) |idx| try self.indices.append(self.allocator, base + idx);
+        }
     }
     
     fn add_slope_visual(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
@@ -134,222 +152,48 @@ const GameResources = struct {
         const half = Vec3.scale(size, 0.5);
         const base = @as(u16, @intCast(self.vertices.items.len));
         
-        // Create wedge vertices
+        const sin_a = @sin(angle_rad);
         const cos_a = @cos(angle_rad);
-        const sin_a = @sin(angle_rad);
         
-        // Bottom vertices (flat base)
-        const v0 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v1 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v2 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
-        const v3 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
+        // Calculate geometry based on collision planes
+        const bottom_y = center.data[1] - half.data[1];
+        const slope_d = sin_a * center.data[0] + cos_a * (center.data[1] + half.data[1]);
         
-        // Top vertices (sloped)
-        const slope_height = half.data[1] * cos_a;
-        const slope_offset = half.data[1] * sin_a;
-        const v4 = Vec3.new(center.data[0] - half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] - half.data[2]);
-        const v5 = Vec3.new(center.data[0] + half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] - half.data[2]);
-        const v6 = Vec3.new(center.data[0] + half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] + half.data[2]);
-        const v7 = Vec3.new(center.data[0] - half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] + half.data[2]);
+        const left_x = center.data[0] - half.data[0];
+        const right_x = center.data[0] + half.data[0];
+        const front_z = center.data[2] - half.data[2];
+        const back_z = center.data[2] + half.data[2];
         
-        const vertices = [_]Vec3{ v0, v1, v2, v3, v4, v5, v6, v7 };
+        const left_slope_y = (slope_d - sin_a * left_x) / cos_a;
+        const right_slope_y = (slope_d - sin_a * right_x) / cos_a;
+        
+        const vertices = [_]Vec3{
+            Vec3.new(left_x, bottom_y, front_z),   Vec3.new(right_x, bottom_y, front_z),
+            Vec3.new(right_x, bottom_y, back_z),   Vec3.new(left_x, bottom_y, back_z),
+            Vec3.new(left_x, left_slope_y, front_z),   Vec3.new(right_x, right_slope_y, front_z),
+            Vec3.new(right_x, right_slope_y, back_z),  Vec3.new(left_x, left_slope_y, back_z),
+        };
         
         for (vertices) |v| {
-            try self.vertices.append(self.allocator, .{
-                .pos = .{ v.data[0], v.data[1], v.data[2] },
-                .col = color,
-            });
+            var c = color;
+            if (v.data[1] <= center.data[1]) { c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; }
+            else { c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; }
+            try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = c });
         }
         
-        // Define faces for the wedge
+        // Clockwise winding for back-face culling
         const faces = [_][3]u16{
-            // Bottom face
-            .{ 0, 2, 1 }, .{ 0, 3, 2 },
-            // Top face (sloped)
-            .{ 4, 5, 6 }, .{ 4, 6, 7 },
-            // Front face
-            .{ 0, 1, 5 }, .{ 0, 5, 4 },
-            // Back face  
-            .{ 2, 3, 7 }, .{ 2, 7, 6 },
-            // Left face
-            .{ 3, 0, 4 }, .{ 3, 4, 7 },
-            // Right face
-            .{ 1, 2, 6 }, .{ 1, 6, 5 },
+            .{ 0, 2, 1 }, .{ 0, 3, 2 }, .{ 4, 5, 6 }, .{ 4, 6, 7 },
+            .{ 0, 1, 5 }, .{ 0, 5, 4 }, .{ 2, 7, 6 }, .{ 2, 6, 3 },
+            .{ 0, 4, 7 }, .{ 0, 7, 3 }, .{ 1, 2, 6 }, .{ 1, 6, 5 },
         };
         
         for (faces) |face| {
-            for (face) |idx| {
-                try self.indices.append(self.allocator, base + idx);
-            }
+            for (face) |idx| try self.indices.append(self.allocator, base + idx);
         }
     }
     
-    fn add_ramp(self: *@This(), center: Vec3, size: Vec3, color: [4]f32) !void {
-        // Create a proper ramp brush (not just a box)
-        const half_size = Vec3.scale(size, 0.5);
-        
-        var planes = try self.allocator.alloc(brush_mod.Plane, 5);
-        defer self.allocator.free(planes);
-        
-        // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
-        planes[0] = brush_mod.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
-        
-        // Ramp surface (30 degree slope along Z axis) - normal points outward
-        const ramp_angle = 30.0 * std.math.pi / 180.0;
-        const ramp_normal = Vec3.normalize(Vec3.new(0, @cos(ramp_angle), @sin(ramp_angle)));
-        const ramp_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
-        planes[1] = brush_mod.Plane.new(ramp_normal, -Vec3.dot(ramp_normal, ramp_point));
-        
-        // Side walls (normals point outward)
-        planes[2] = brush_mod.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
-        planes[3] = brush_mod.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
-        
-        // Back wall (normal points outward)
-        planes[4] = brush_mod.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
-        
-        const brush = try brush_mod.Brush.init(self.allocator, planes);
-        try self.brush_world.addBrush(brush);
-        
-        // Add visual geometry for the ramp
-        try self.add_ramp_visual(center, size, color);
-    }
-    
-    fn add_ramp_visual(self: *@This(), center: Vec3, size: Vec3, color: [4]f32) !void {
-        const half = Vec3.scale(size, 0.5);
-        const base = @as(u16, @intCast(self.vertices.items.len));
-        
-        // Create ramp vertices (sloped along Z axis)
-        const ramp_angle = 30.0 * std.math.pi / 180.0;
-        const sin_a = @sin(ramp_angle);
-        
-        // Bottom vertices
-        const v0 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v1 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v2 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
-        const v3 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
-        
-        // Top vertices (ramped)
-        const ramp_height = half.data[2] * sin_a;
-        const v4 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v5 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v6 = Vec3.new(center.data[0] + half.data[0], center.data[1] + ramp_height, center.data[2] + half.data[2]);
-        const v7 = Vec3.new(center.data[0] - half.data[0], center.data[1] + ramp_height, center.data[2] + half.data[2]);
-        
-        const vertices = [_]Vec3{ v0, v1, v2, v3, v4, v5, v6, v7 };
-        
-        for (vertices) |v| {
-            try self.vertices.append(self.allocator, .{
-                .pos = .{ v.data[0], v.data[1], v.data[2] },
-                .col = color,
-            });
-        }
-        
-        // Define faces for the ramp
-        const faces = [_][3]u16{
-            // Bottom face
-            .{ 0, 2, 1 }, .{ 0, 3, 2 },
-            // Ramp surface
-            .{ 4, 6, 5 }, .{ 4, 7, 6 },
-            // Left face
-            .{ 3, 0, 4 }, .{ 3, 4, 7 },
-            // Right face
-            .{ 1, 2, 6 }, .{ 1, 6, 5 },
-            // Back face
-            .{ 0, 1, 5 }, .{ 0, 5, 4 },
-        };
-        
-        for (faces) |face| {
-            for (face) |idx| {
-                try self.indices.append(self.allocator, base + idx);
-            }
-        }
-    }
-    
-    fn add_angled_wall(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
-        const angle_rad = angle_degrees * std.math.pi / 180.0;
-        const half_size = Vec3.scale(size, 0.5);
-        
-        // Create planes for an angled wall brush
-        var planes = try self.allocator.alloc(brush_mod.Plane, 6);
-        defer self.allocator.free(planes);
-        
-        // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
-        planes[0] = brush_mod.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
-        
-        // Top plane (y = max.y): normal (0,1,0) pointing outward (upward)
-        planes[1] = brush_mod.Plane.new(Vec3.new(0, 1, 0), -(center.data[1] + half_size.data[1]));
-        
-        // Angled front face - normal points outward
-        const wall_normal = Vec3.normalize(Vec3.new(@cos(angle_rad), 0, @sin(angle_rad)));
-        const wall_point = Vec3.new(center.data[0] + half_size.data[0], center.data[1], center.data[2]);
-        planes[2] = brush_mod.Plane.new(wall_normal, -Vec3.dot(wall_normal, wall_point));
-        
-        // Back face (normal points outward)
-        planes[3] = brush_mod.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
-        
-        // Side faces (normals point outward)
-        planes[4] = brush_mod.Plane.new(Vec3.new(0, 0, 1), -(center.data[2] + half_size.data[2]));
-        planes[5] = brush_mod.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
-        
-        const brush = try brush_mod.Brush.init(self.allocator, planes);
-        try self.brush_world.addBrush(brush);
-        
-        // Add visual geometry for the angled wall
-        try self.add_angled_wall_visual(center, size, angle_degrees, color);
-    }
-    
-    fn add_angled_wall_visual(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
-        const angle_rad = angle_degrees * std.math.pi / 180.0;
-        const half = Vec3.scale(size, 0.5);
-        const base = @as(u16, @intCast(self.vertices.items.len));
-        
-        // Create angled wall vertices
-        const sin_a = @sin(angle_rad);
-        
-        // Back vertices (straight)
-        const v0 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
-        const v1 = Vec3.new(center.data[0] - half.data[0], center.data[1] + half.data[1], center.data[2] - half.data[2]);
-        const v2 = Vec3.new(center.data[0] - half.data[0], center.data[1] + half.data[1], center.data[2] + half.data[2]);
-        const v3 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
-        
-        // Front vertices (angled)
-        const angle_offset = half.data[0] * sin_a;
-        const v4 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2] + angle_offset);
-        const v5 = Vec3.new(center.data[0] + half.data[0], center.data[1] + half.data[1], center.data[2] - half.data[2] + angle_offset);
-        const v6 = Vec3.new(center.data[0] + half.data[0], center.data[1] + half.data[1], center.data[2] + half.data[2] + angle_offset);
-        const v7 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2] + angle_offset);
-        
-        const vertices = [_]Vec3{ v0, v1, v2, v3, v4, v5, v6, v7 };
-        
-        for (vertices) |v| {
-            try self.vertices.append(self.allocator, .{
-                .pos = .{ v.data[0], v.data[1], v.data[2] },
-                .col = color,
-            });
-        }
-        
-        // Define faces for the angled wall
-        const faces = [_][3]u16{
-            // Bottom face
-            .{ 0, 4, 7 }, .{ 0, 7, 3 },
-            // Top face
-            .{ 1, 2, 6 }, .{ 1, 6, 5 },
-            // Back face
-            .{ 0, 3, 2 }, .{ 0, 2, 1 },
-            // Angled front face
-            .{ 4, 5, 6 }, .{ 4, 6, 7 },
-            // Left face
-            .{ 0, 1, 5 }, .{ 0, 5, 4 },
-            // Right face
-            .{ 3, 7, 6 }, .{ 3, 6, 2 },
-        };
-        
-        for (faces) |face| {
-            for (face) |idx| {
-                try self.indices.append(self.allocator, base + idx);
-            }
-        }
-    }
+
     
     fn build(self: *@This()) !void {
         try self.brush_world.build();
