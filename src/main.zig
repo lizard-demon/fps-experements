@@ -99,6 +99,258 @@ const GameResources = struct {
         inline for (0..6) |f| for ([_]u16{0,1,2,0,2,3}) |i| try self.indices.append(self.allocator, base + @as(u16, @intCast(f*4 + i)));
     }
     
+    fn add_slope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
+        const angle_rad = angle_degrees * std.math.pi / 180.0;
+        const half_size = Vec3.scale(size, 0.5);
+        
+        // Create planes for a sloped brush (wedge shape)
+        var planes = try self.allocator.alloc(brush_mod.Plane, 5);
+        defer self.allocator.free(planes);
+        
+        // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
+        planes[0] = brush_mod.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
+        
+        // Sloped surface - normal points outward from the slope
+        const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
+        const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
+        planes[1] = brush_mod.Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
+        
+        // Side walls (normals point outward)
+        planes[2] = brush_mod.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
+        planes[3] = brush_mod.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
+        
+        // Back wall (normal points outward)
+        planes[4] = brush_mod.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
+        
+        const brush = try brush_mod.Brush.init(self.allocator, planes);
+        try self.brush_world.addBrush(brush);
+        
+        // Add visual geometry for the slope (wedge shape)
+        try self.add_slope_visual(center, size, angle_degrees, color);
+    }
+    
+    fn add_slope_visual(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
+        const angle_rad = angle_degrees * std.math.pi / 180.0;
+        const half = Vec3.scale(size, 0.5);
+        const base = @as(u16, @intCast(self.vertices.items.len));
+        
+        // Create wedge vertices
+        const cos_a = @cos(angle_rad);
+        const sin_a = @sin(angle_rad);
+        
+        // Bottom vertices (flat base)
+        const v0 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v1 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v2 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
+        const v3 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
+        
+        // Top vertices (sloped)
+        const slope_height = half.data[1] * cos_a;
+        const slope_offset = half.data[1] * sin_a;
+        const v4 = Vec3.new(center.data[0] - half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] - half.data[2]);
+        const v5 = Vec3.new(center.data[0] + half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] - half.data[2]);
+        const v6 = Vec3.new(center.data[0] + half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] + half.data[2]);
+        const v7 = Vec3.new(center.data[0] - half.data[0] + slope_offset, center.data[1] + slope_height, center.data[2] + half.data[2]);
+        
+        const vertices = [_]Vec3{ v0, v1, v2, v3, v4, v5, v6, v7 };
+        
+        for (vertices) |v| {
+            try self.vertices.append(self.allocator, .{
+                .pos = .{ v.data[0], v.data[1], v.data[2] },
+                .col = color,
+            });
+        }
+        
+        // Define faces for the wedge
+        const faces = [_][3]u16{
+            // Bottom face
+            .{ 0, 2, 1 }, .{ 0, 3, 2 },
+            // Top face (sloped)
+            .{ 4, 5, 6 }, .{ 4, 6, 7 },
+            // Front face
+            .{ 0, 1, 5 }, .{ 0, 5, 4 },
+            // Back face  
+            .{ 2, 3, 7 }, .{ 2, 7, 6 },
+            // Left face
+            .{ 3, 0, 4 }, .{ 3, 4, 7 },
+            // Right face
+            .{ 1, 2, 6 }, .{ 1, 6, 5 },
+        };
+        
+        for (faces) |face| {
+            for (face) |idx| {
+                try self.indices.append(self.allocator, base + idx);
+            }
+        }
+    }
+    
+    fn add_ramp(self: *@This(), center: Vec3, size: Vec3, color: [4]f32) !void {
+        // Create a proper ramp brush (not just a box)
+        const half_size = Vec3.scale(size, 0.5);
+        
+        var planes = try self.allocator.alloc(brush_mod.Plane, 5);
+        defer self.allocator.free(planes);
+        
+        // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
+        planes[0] = brush_mod.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
+        
+        // Ramp surface (30 degree slope along Z axis) - normal points outward
+        const ramp_angle = 30.0 * std.math.pi / 180.0;
+        const ramp_normal = Vec3.normalize(Vec3.new(0, @cos(ramp_angle), @sin(ramp_angle)));
+        const ramp_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
+        planes[1] = brush_mod.Plane.new(ramp_normal, -Vec3.dot(ramp_normal, ramp_point));
+        
+        // Side walls (normals point outward)
+        planes[2] = brush_mod.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
+        planes[3] = brush_mod.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
+        
+        // Back wall (normal points outward)
+        planes[4] = brush_mod.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
+        
+        const brush = try brush_mod.Brush.init(self.allocator, planes);
+        try self.brush_world.addBrush(brush);
+        
+        // Add visual geometry for the ramp
+        try self.add_ramp_visual(center, size, color);
+    }
+    
+    fn add_ramp_visual(self: *@This(), center: Vec3, size: Vec3, color: [4]f32) !void {
+        const half = Vec3.scale(size, 0.5);
+        const base = @as(u16, @intCast(self.vertices.items.len));
+        
+        // Create ramp vertices (sloped along Z axis)
+        const ramp_angle = 30.0 * std.math.pi / 180.0;
+        const sin_a = @sin(ramp_angle);
+        
+        // Bottom vertices
+        const v0 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v1 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v2 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
+        const v3 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
+        
+        // Top vertices (ramped)
+        const ramp_height = half.data[2] * sin_a;
+        const v4 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v5 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v6 = Vec3.new(center.data[0] + half.data[0], center.data[1] + ramp_height, center.data[2] + half.data[2]);
+        const v7 = Vec3.new(center.data[0] - half.data[0], center.data[1] + ramp_height, center.data[2] + half.data[2]);
+        
+        const vertices = [_]Vec3{ v0, v1, v2, v3, v4, v5, v6, v7 };
+        
+        for (vertices) |v| {
+            try self.vertices.append(self.allocator, .{
+                .pos = .{ v.data[0], v.data[1], v.data[2] },
+                .col = color,
+            });
+        }
+        
+        // Define faces for the ramp
+        const faces = [_][3]u16{
+            // Bottom face
+            .{ 0, 2, 1 }, .{ 0, 3, 2 },
+            // Ramp surface
+            .{ 4, 6, 5 }, .{ 4, 7, 6 },
+            // Left face
+            .{ 3, 0, 4 }, .{ 3, 4, 7 },
+            // Right face
+            .{ 1, 2, 6 }, .{ 1, 6, 5 },
+            // Back face
+            .{ 0, 1, 5 }, .{ 0, 5, 4 },
+        };
+        
+        for (faces) |face| {
+            for (face) |idx| {
+                try self.indices.append(self.allocator, base + idx);
+            }
+        }
+    }
+    
+    fn add_angled_wall(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
+        const angle_rad = angle_degrees * std.math.pi / 180.0;
+        const half_size = Vec3.scale(size, 0.5);
+        
+        // Create planes for an angled wall brush
+        var planes = try self.allocator.alloc(brush_mod.Plane, 6);
+        defer self.allocator.free(planes);
+        
+        // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
+        planes[0] = brush_mod.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
+        
+        // Top plane (y = max.y): normal (0,1,0) pointing outward (upward)
+        planes[1] = brush_mod.Plane.new(Vec3.new(0, 1, 0), -(center.data[1] + half_size.data[1]));
+        
+        // Angled front face - normal points outward
+        const wall_normal = Vec3.normalize(Vec3.new(@cos(angle_rad), 0, @sin(angle_rad)));
+        const wall_point = Vec3.new(center.data[0] + half_size.data[0], center.data[1], center.data[2]);
+        planes[2] = brush_mod.Plane.new(wall_normal, -Vec3.dot(wall_normal, wall_point));
+        
+        // Back face (normal points outward)
+        planes[3] = brush_mod.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
+        
+        // Side faces (normals point outward)
+        planes[4] = brush_mod.Plane.new(Vec3.new(0, 0, 1), -(center.data[2] + half_size.data[2]));
+        planes[5] = brush_mod.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
+        
+        const brush = try brush_mod.Brush.init(self.allocator, planes);
+        try self.brush_world.addBrush(brush);
+        
+        // Add visual geometry for the angled wall
+        try self.add_angled_wall_visual(center, size, angle_degrees, color);
+    }
+    
+    fn add_angled_wall_visual(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
+        const angle_rad = angle_degrees * std.math.pi / 180.0;
+        const half = Vec3.scale(size, 0.5);
+        const base = @as(u16, @intCast(self.vertices.items.len));
+        
+        // Create angled wall vertices
+        const sin_a = @sin(angle_rad);
+        
+        // Back vertices (straight)
+        const v0 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2]);
+        const v1 = Vec3.new(center.data[0] - half.data[0], center.data[1] + half.data[1], center.data[2] - half.data[2]);
+        const v2 = Vec3.new(center.data[0] - half.data[0], center.data[1] + half.data[1], center.data[2] + half.data[2]);
+        const v3 = Vec3.new(center.data[0] - half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2]);
+        
+        // Front vertices (angled)
+        const angle_offset = half.data[0] * sin_a;
+        const v4 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] - half.data[2] + angle_offset);
+        const v5 = Vec3.new(center.data[0] + half.data[0], center.data[1] + half.data[1], center.data[2] - half.data[2] + angle_offset);
+        const v6 = Vec3.new(center.data[0] + half.data[0], center.data[1] + half.data[1], center.data[2] + half.data[2] + angle_offset);
+        const v7 = Vec3.new(center.data[0] + half.data[0], center.data[1] - half.data[1], center.data[2] + half.data[2] + angle_offset);
+        
+        const vertices = [_]Vec3{ v0, v1, v2, v3, v4, v5, v6, v7 };
+        
+        for (vertices) |v| {
+            try self.vertices.append(self.allocator, .{
+                .pos = .{ v.data[0], v.data[1], v.data[2] },
+                .col = color,
+            });
+        }
+        
+        // Define faces for the angled wall
+        const faces = [_][3]u16{
+            // Bottom face
+            .{ 0, 4, 7 }, .{ 0, 7, 3 },
+            // Top face
+            .{ 1, 2, 6 }, .{ 1, 6, 5 },
+            // Back face
+            .{ 0, 3, 2 }, .{ 0, 2, 1 },
+            // Angled front face
+            .{ 4, 5, 6 }, .{ 4, 6, 7 },
+            // Left face
+            .{ 0, 1, 5 }, .{ 0, 5, 4 },
+            // Right face
+            .{ 3, 7, 6 }, .{ 3, 6, 2 },
+        };
+        
+        for (faces) |face| {
+            for (face) |idx| {
+                try self.indices.append(self.allocator, base + idx);
+            }
+        }
+    }
+    
     fn build(self: *@This()) !void {
         try self.brush_world.build();
         
@@ -135,6 +387,7 @@ fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, aud
     const dt = resources.delta_time;
     const size = Vec3.new(0.98, 1.8, 0.98);
     const player_aabb = AABB.fromCenterSize(Vec3.zero(), size);
+    const tolerance = 0.01;
     
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
         const fwd: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
@@ -174,7 +427,8 @@ fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, aud
         if (p.on_ground) {
             const speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
             if (speed > 0.1) {
-                const factor = @max(0, speed - @max(speed, 0.1) * 5.0 * dt) / speed;
+                const friction_factor: f32 = 5.0;
+                const factor = @max(0, speed - @max(speed, 0.1) * friction_factor * dt) / speed;
                 p.vel.data[0] *= factor; 
                 p.vel.data[2] *= factor;
             } else { 
@@ -183,32 +437,35 @@ fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, aud
             }
         }
         
-        // Simple movement with collision
+        // Movement with collision
         const delta = Vec3.scale(p.vel, dt);
         const old_pos = t.pos;
         const new_pos = resources.brush_world.movePlayer(t.pos, delta, player_aabb);
         
-        // Only update velocity components that were blocked by collision
+        // Update velocity based on actual movement (for sliding and bouncing)
         const actual_delta = Vec3.sub(new_pos, old_pos);
         
-        // If we couldn't move in a direction, zero that velocity component
-        if (@abs(delta.data[0]) > 0.001 and @abs(actual_delta.data[0]) < 0.001) {
-            p.vel.data[0] = 0;
+        // Only zero velocity if we completely failed to move in that direction
+        // This allows for sliding along walls and surfaces
+        if (@abs(delta.data[0]) > tolerance and @abs(actual_delta.data[0]) < tolerance * 0.1) {
+            p.vel.data[0] *= 0.1; // Reduce but don't completely zero for sliding
         }
-        if (@abs(delta.data[1]) > 0.001 and @abs(actual_delta.data[1]) < 0.001) {
-            p.vel.data[1] = 0;
+        if (@abs(delta.data[1]) > tolerance and @abs(actual_delta.data[1]) < tolerance * 0.1) {
+            p.vel.data[1] = 0; // Always zero Y velocity when hitting ceiling/floor
         }
-        if (@abs(delta.data[2]) > 0.001 and @abs(actual_delta.data[2]) < 0.001) {
-            p.vel.data[2] = 0;
+        if (@abs(delta.data[2]) > tolerance and @abs(actual_delta.data[2]) < tolerance * 0.1) {
+            p.vel.data[2] *= 0.1; // Reduce but don't completely zero for sliding
         }
         
-        // Check if we're on ground by testing slightly below
-        const ground_test_pos = Vec3.new(new_pos.data[0], new_pos.data[1] - 0.1, new_pos.data[2]);
+        // Improved ground detection - check slightly below current position
+        const ground_check_distance = 0.05;
+        const ground_test_pos = Vec3.new(new_pos.data[0], new_pos.data[1] - ground_check_distance, new_pos.data[2]);
         const ground_aabb = AABB{
             .min = Vec3.add(ground_test_pos, player_aabb.min),
             .max = Vec3.add(ground_test_pos, player_aabb.max)
         };
         
+        // We're on ground if there's collision below us and we're not moving up fast
         p.on_ground = resources.brush_world.testCollision(ground_aabb) and p.vel.data[1] <= 0.1;
         
         t.pos = new_pos;
@@ -239,20 +496,30 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // World
-    store.resources.add_box(Vec3.new(0, -1, 0), Vec3.new(60, 2, 60), .{ 0.3, 0.3, 0.35, 1 }) catch {};
-    const walls = [_][6]f32{ .{30,5,0,2,10,60}, .{-30,5,0,2,10,60}, .{0,5,30,60,10,2}, .{0,5,-30,60,10,2}, .{0,5,0,4,10,4} };
-    for (walls) |w| store.resources.add_box(Vec3.new(w[0], w[1], w[2]), Vec3.new(w[3], w[4], w[5]), .{ 0.5, 0.4, 0.3, 1 }) catch {};
-    for (0..4) |i| {
-        const f = @as(f32, @floatFromInt(i));
-        store.resources.add_box(Vec3.new(10 + f * 2, 0.5 + f, 10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    }
-    store.resources.add_box(Vec3.new(18, 3.5, 10), Vec3.new(8, 1, 8), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    // Clean test world with just essentials
+    
+    // Ground plane
+    store.resources.add_box(Vec3.new(0, -1, 0), Vec3.new(40, 2, 40), .{ 0.3, 0.3, 0.35, 1 }) catch {};
+    
+    // Boundary walls
+    store.resources.add_box(Vec3.new(20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Right wall
+    store.resources.add_box(Vec3.new(-20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Left wall
+    store.resources.add_box(Vec3.new(0, 5, 20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Front wall
+    store.resources.add_box(Vec3.new(0, 5, -20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Back wall
+    
+    // Simple steps for testing step-up mechanics
+    store.resources.add_box(Vec3.new(-10, 0.5, -10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {}; // Step 1
+    store.resources.add_box(Vec3.new(-10, 1.5, -6), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {}; // Step 2
+    store.resources.add_box(Vec3.new(-10, 2.5, -2), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {}; // Step 3
+    
+    // One test slope for slope mechanics
+    store.resources.add_slope(Vec3.new(10, 0, 0), Vec3.new(8, 6, 8), 30.0, .{ 0.2, 0.6, 0.2, 1 }) catch {};
+    
     store.resources.build() catch {};
     
-    // Player
+    // Player - spawn in the center of the simplified world
     store.resources.player_entity = store.create(Player, allocator, .{
-        .transform = .{ .pos = Vec3.new(0, 10, -10) },
+        .transform = .{ .pos = Vec3.new(0, 2, 0) },
         .physics = .{}, .input = .{}, .audio = .{},
     }) catch unreachable;
     

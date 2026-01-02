@@ -7,6 +7,8 @@ pub const Plane = struct {
     normal: Vec3,
     distance: f32,
     
+    // Standard plane equation: dot(normal, point) + distance = 0
+    // Points inside the brush satisfy: dot(normal, point) + distance <= 0
     pub fn new(normal: Vec3, distance: f32) Plane {
         return .{ .normal = normal, .distance = distance };
     }
@@ -15,16 +17,19 @@ pub const Plane = struct {
         const ab = Vec3.sub(b, a);
         const ac = Vec3.sub(c, a);
         const normal = Vec3.normalize(Vec3.cross(ab, ac));
-        const distance = Vec3.dot(normal, a);
+        const distance = -Vec3.dot(normal, a);
         return .{ .normal = normal, .distance = distance };
     }
     
     pub fn distanceToPoint(self: Plane, point: Vec3) f32 {
-        return Vec3.dot(self.normal, point) - self.distance;
+        return Vec3.dot(self.normal, point) + self.distance;
     }
     
+    // Use consistent epsilon for all collision checks
+    pub const COLLISION_EPSILON = 0.001;
+    
     pub fn isPointInFront(self: Plane, point: Vec3) bool {
-        return self.distanceToPoint(point) > 0.001;
+        return self.distanceToPoint(point) > COLLISION_EPSILON;
     }
 };
 
@@ -45,20 +50,36 @@ pub const Brush = struct {
     pub fn createBox(allocator: std.mem.Allocator, min: Vec3, max: Vec3) !Brush {
         var planes = try allocator.alloc(Plane, 6);
         
-        // Right, Left, Top, Bottom, Front, Back
-        planes[0] = Plane.new(Vec3.new(1, 0, 0), max.data[0]);
-        planes[1] = Plane.new(Vec3.new(-1, 0, 0), -min.data[0]);
-        planes[2] = Plane.new(Vec3.new(0, 1, 0), max.data[1]);
-        planes[3] = Plane.new(Vec3.new(0, -1, 0), -min.data[1]);
-        planes[4] = Plane.new(Vec3.new(0, 0, 1), max.data[2]);
-        planes[5] = Plane.new(Vec3.new(0, 0, -1), -min.data[2]);
+        // Create box planes with normals pointing OUTWARD from the solid
+        // Using plane equation: dot(normal, point) + distance = 0
+        // Points inside satisfy: dot(normal, point) + distance <= 0
+        
+        // Right face (x = max.x): normal (1,0,0) pointing outward
+        planes[0] = Plane.new(Vec3.new(1, 0, 0), -max.data[0]);
+        
+        // Left face (x = min.x): normal (-1,0,0) pointing outward
+        planes[1] = Plane.new(Vec3.new(-1, 0, 0), min.data[0]);
+        
+        // Top face (y = max.y): normal (0,1,0) pointing outward
+        planes[2] = Plane.new(Vec3.new(0, 1, 0), -max.data[1]);
+        
+        // Bottom face (y = min.y): normal (0,-1,0) pointing outward (downward)
+        planes[3] = Plane.new(Vec3.new(0, -1, 0), min.data[1]);
+        
+        // Front face (z = max.z): normal (0,0,1) pointing outward
+        planes[4] = Plane.new(Vec3.new(0, 0, 1), -max.data[2]);
+        
+        // Back face (z = min.z): normal (0,0,-1) pointing outward
+        planes[5] = Plane.new(Vec3.new(0, 0, -1), min.data[2]);
         
         return .{ .planes = planes, .bounds = AABB{ .min = min, .max = max } };
     }
     
     pub fn isPointInside(self: Brush, point: Vec3) bool {
+        // A point is inside if it's behind (or on) all planes
+        // Since our normals point outward, distance <= 0 means inside
         for (self.planes) |plane| {
-            if (plane.distanceToPoint(point) > 0.001) return false;
+            if (plane.distanceToPoint(point) > Plane.COLLISION_EPSILON) return false;
         }
         return true;
     }
@@ -78,7 +99,7 @@ pub const Brush = struct {
                           @abs(plane.normal.data[2] * extents.data[2]);
             
             const distance = plane.distanceToPoint(center);
-            if (distance > radius + 0.001) return false; // AABB is completely in front of plane
+            if (distance > radius + Plane.COLLISION_EPSILON) return false;
         }
         return true;
     }
@@ -113,38 +134,55 @@ pub const AABB = struct {
     }
 };
 
+// Simple bounds calculation for axis-aligned and simple angled brushes
 fn calculateBounds(planes: []const Plane) AABB {
-    // Simple bounds calculation - find intersection of half-spaces
-    // For a proper implementation, we'd solve the linear programming problem
-    // For now, use a large bounding box and shrink it
-    var min = Vec3.new(-1000, -1000, -1000);
-    var max = Vec3.new(1000, 1000, 1000);
+    // Start with a reasonable bounding box and shrink it based on planes
+    var min = Vec3.new(-100, -100, -100);
+    var max = Vec3.new(100, 100, 100);
     
-    // This is a simplified approach - in practice you'd want to solve
-    // the convex hull intersection properly
+    // For each plane, calculate the constraint it imposes on the bounding box
+    // Since normals now point outward, we need to adjust the logic
     for (planes) |plane| {
-        if (@abs(plane.normal.data[0]) > 0.9) {
+        const abs_normal = Vec3.new(@abs(plane.normal.data[0]), @abs(plane.normal.data[1]), @abs(plane.normal.data[2]));
+        
+        // Find the dominant axis (largest component of normal)
+        const max_component = @max(@max(abs_normal.data[0], abs_normal.data[1]), abs_normal.data[2]);
+        
+        if (abs_normal.data[0] == max_component and abs_normal.data[0] > 0.9) {
+            // X-axis dominant plane
             if (plane.normal.data[0] > 0) {
-                max.data[0] = @min(max.data[0], plane.distance);
+                // Normal points in +X direction, so this constrains max.x
+                max.data[0] = @min(max.data[0], -plane.distance);
             } else {
-                min.data[0] = @max(min.data[0], -plane.distance);
+                // Normal points in -X direction, so this constrains min.x
+                min.data[0] = @max(min.data[0], plane.distance);
             }
-        }
-        if (@abs(plane.normal.data[1]) > 0.9) {
+        } else if (abs_normal.data[1] == max_component and abs_normal.data[1] > 0.9) {
+            // Y-axis dominant plane
             if (plane.normal.data[1] > 0) {
-                max.data[1] = @min(max.data[1], plane.distance);
+                // Normal points in +Y direction, so this constrains max.y
+                max.data[1] = @min(max.data[1], -plane.distance);
             } else {
-                min.data[1] = @max(min.data[1], -plane.distance);
+                // Normal points in -Y direction, so this constrains min.y
+                min.data[1] = @max(min.data[1], plane.distance);
             }
-        }
-        if (@abs(plane.normal.data[2]) > 0.9) {
+        } else if (abs_normal.data[2] == max_component and abs_normal.data[2] > 0.9) {
+            // Z-axis dominant plane
             if (plane.normal.data[2] > 0) {
-                max.data[2] = @min(max.data[2], plane.distance);
+                // Normal points in +Z direction, so this constrains max.z
+                max.data[2] = @min(max.data[2], -plane.distance);
             } else {
-                min.data[2] = @max(min.data[2], -plane.distance);
+                // Normal points in -Z direction, so this constrains min.z
+                min.data[2] = @max(min.data[2], plane.distance);
             }
         }
+        // For non-axis-aligned planes, we keep the conservative bounds
     }
+    
+    // Ensure valid bounds
+    if (min.data[0] > max.data[0]) { min.data[0] = 0; max.data[0] = 0; }
+    if (min.data[1] > max.data[1]) { min.data[1] = 0; max.data[1] = 0; }
+    if (min.data[2] > max.data[2]) { min.data[2] = 0; max.data[2] = 0; }
     
     return AABB{ .min = min, .max = max };
 }
@@ -165,7 +203,7 @@ pub fn testAABBBrush(aabb: AABB, brush: Brush) bool {
                       @abs(plane.normal.data[2] * extents.data[2]);
         
         const distance = plane.distanceToPoint(center);
-        if (distance > radius) return false; // AABB is completely in front of plane
+        if (distance > radius + Plane.COLLISION_EPSILON) return false;
     }
     return true;
 }
@@ -185,7 +223,7 @@ pub fn moveAABBAgainstBrush(start: Vec3, delta: Vec3, aabb: AABB, brush: Brush) 
     var remaining_delta = delta;
     
     // X axis
-    if (@abs(remaining_delta.data[0]) > 0.001) {
+    if (@abs(remaining_delta.data[0]) > Plane.COLLISION_EPSILON) {
         const test_pos = Vec3.new(pos.data[0] + remaining_delta.data[0], pos.data[1], pos.data[2]);
         const test_aabb = AABB{
             .min = Vec3.add(test_pos, aabb.min),
@@ -202,7 +240,7 @@ pub fn moveAABBAgainstBrush(start: Vec3, delta: Vec3, aabb: AABB, brush: Brush) 
     }
     
     // Y axis
-    if (@abs(remaining_delta.data[1]) > 0.001) {
+    if (@abs(remaining_delta.data[1]) > Plane.COLLISION_EPSILON) {
         const test_pos = Vec3.new(pos.data[0], pos.data[1] + remaining_delta.data[1], pos.data[2]);
         const test_aabb = AABB{
             .min = Vec3.add(test_pos, aabb.min),
@@ -219,7 +257,7 @@ pub fn moveAABBAgainstBrush(start: Vec3, delta: Vec3, aabb: AABB, brush: Brush) 
     }
     
     // Z axis
-    if (@abs(remaining_delta.data[2]) > 0.001) {
+    if (@abs(remaining_delta.data[2]) > Plane.COLLISION_EPSILON) {
         const test_pos = Vec3.new(pos.data[0], pos.data[1], pos.data[2] + remaining_delta.data[2]);
         const test_aabb = AABB{
             .min = Vec3.add(test_pos, aabb.min),

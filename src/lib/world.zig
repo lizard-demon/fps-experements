@@ -49,29 +49,79 @@ pub const BrushWorld = struct {
     
     pub fn testCollision(self: *const BrushWorld, aabb: AABB) bool {
         for (self.brushes.items) |brush| {
-            if (brush_mod.testAABBBrush(aabb, brush)) return true;
+            if (brush_mod.testAABBBrush(aabb, brush)) {
+                return true;
+            }
         }
         return false;
     }
     
-    // Simple movement - test each axis separately
+    // Simple and robust movement with basic step-up for stairs
     pub fn movePlayer(self: *const BrushWorld, start: Vec3, delta: Vec3, player_aabb: AABB) Vec3 {
         var pos = start;
+        const step_height = 0.25; // Maximum step height for stairs
         
-        // Move X axis
-        if (@abs(delta.data[0]) > 0.001) {
-            const test_pos = Vec3.new(pos.data[0] + delta.data[0], pos.data[1], pos.data[2]);
-            const test_aabb = AABB{
+        // Try to move horizontally first (X and Z together)
+        const horizontal_delta = Vec3.new(delta.data[0], 0, delta.data[2]);
+        if (Vec3.length(horizontal_delta) > brush_mod.Plane.COLLISION_EPSILON) {
+            var test_pos = Vec3.add(pos, horizontal_delta);
+            var test_aabb = AABB{
                 .min = Vec3.add(test_pos, player_aabb.min),
                 .max = Vec3.add(test_pos, player_aabb.max)
             };
-            if (!self.testCollision(test_aabb)) {
+            
+            if (self.testCollision(test_aabb)) {
+                // Try stepping up for stairs/small obstacles
+                test_pos.data[1] += step_height;
+                test_aabb = AABB{
+                    .min = Vec3.add(test_pos, player_aabb.min),
+                    .max = Vec3.add(test_pos, player_aabb.max)
+                };
+                
+                if (!self.testCollision(test_aabb)) {
+                    // We can step up, now try to step back down to find the ground
+                    var step_down_pos = test_pos;
+                    var found_ground = false;
+                    
+                    // Step down in small increments to find the ground
+                    var step_down: f32 = 0.05;
+                    while (step_down <= step_height + 0.1) {
+                        step_down_pos.data[1] = test_pos.data[1] - step_down;
+                        const step_down_aabb = AABB{
+                            .min = Vec3.add(step_down_pos, player_aabb.min),
+                            .max = Vec3.add(step_down_pos, player_aabb.max)
+                        };
+                        
+                        if (self.testCollision(step_down_aabb)) {
+                            // Found ground, use previous position
+                            step_down_pos.data[1] = test_pos.data[1] - (step_down - 0.05);
+                            found_ground = true;
+                            break;
+                        }
+                        step_down += 0.05;
+                    }
+                    
+                    if (found_ground) {
+                        pos.data[0] = step_down_pos.data[0];
+                        pos.data[1] = step_down_pos.data[1];
+                        pos.data[2] = step_down_pos.data[2];
+                    } else {
+                        // No ground found, just step up
+                        pos.data[0] = test_pos.data[0];
+                        pos.data[1] = test_pos.data[1];
+                        pos.data[2] = test_pos.data[2];
+                    }
+                }
+                // If we can't step up either, don't move horizontally
+            } else {
+                // No collision, move normally
                 pos.data[0] = test_pos.data[0];
+                pos.data[2] = test_pos.data[2];
             }
         }
         
-        // Move Y axis
-        if (@abs(delta.data[1]) > 0.001) {
+        // Move vertically (Y axis)
+        if (@abs(delta.data[1]) > brush_mod.Plane.COLLISION_EPSILON) {
             const test_pos = Vec3.new(pos.data[0], pos.data[1] + delta.data[1], pos.data[2]);
             const test_aabb = AABB{
                 .min = Vec3.add(test_pos, player_aabb.min),
@@ -79,18 +129,6 @@ pub const BrushWorld = struct {
             };
             if (!self.testCollision(test_aabb)) {
                 pos.data[1] = test_pos.data[1];
-            }
-        }
-        
-        // Move Z axis
-        if (@abs(delta.data[2]) > 0.001) {
-            const test_pos = Vec3.new(pos.data[0], pos.data[1], pos.data[2] + delta.data[2]);
-            const test_aabb = AABB{
-                .min = Vec3.add(test_pos, player_aabb.min),
-                .max = Vec3.add(test_pos, player_aabb.max)
-            };
-            if (!self.testCollision(test_aabb)) {
-                pos.data[2] = test_pos.data[2];
             }
         }
         
