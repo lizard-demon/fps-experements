@@ -24,16 +24,44 @@ const Brush = struct {
         return self.box;
     }
 };
-const Node = struct { box: AABB, left: u32 = 0, right: u32 = 0, first: u32 = 0, count: u32 = 0 };
 
+// Components
 const Physics = struct { 
     pos: Vec3, 
     vel: Vec3,
     on_ground: bool = false,
 };
-const Input = struct { yaw: f32 = 0, pitch: f32 = 0, mdx: f32 = 0, mdy: f32 = 0, keys: packed struct { w: bool=false, a: bool=false, s: bool=false, d: bool=false, sp: bool=false } = .{}, lock: bool = false };
+const Input = struct { 
+    yaw: f32 = 0, 
+    pitch: f32 = 0, 
+    mdx: f32 = 0, 
+    mdy: f32 = 0, 
+    keys: packed struct { 
+        w: bool = false, 
+        a: bool = false, 
+        s: bool = false, 
+        d: bool = false, 
+        sp: bool = false 
+    } = .{}, 
+    lock: bool = false 
+};
+
+// Archetypes
 const Player = struct { physics: Physics, input: Input };
-const Entities = struct { players: ecs.List(Player) };
+
+// Registry
+const Registry = struct { players: ecs.List(Player) };
+
+// Resources - now contains everything that was in the global st
+const GameResources = struct {
+    delta_time: f32 = 0.0,
+    world: World,
+    renderer: Renderer = .{},
+    jump_sound: bool = false,
+    jump_timer: f32 = 0.0,
+    mem: std.mem.Allocator,
+    player_entity: ecs.Entity(Player) = undefined,
+};
 
 const World = struct {
     brushes: std.ArrayListUnmanaged(Brush) = .{},
@@ -111,8 +139,16 @@ const World = struct {
     }
 };
 
-fn sys_PlayerUpdate(phy: []Physics, inp: []Input) void {
-    const dt = @as(f32, @floatCast(sapp.frameDuration()));
+// Global collision function for physics (now uses the store)
+var game_store: *ecs.Store(Registry, GameResources) = undefined;
+
+fn world_collision_check(aabb: bvh.AABB) bool {
+    return game_store.resources.world.hit(aabb);
+}
+
+// Systems using the new ECS
+fn sys_PlayerUpdate(phy: []Physics, inp: []Input, resources: *GameResources) void {
+    const dt = resources.delta_time;
     
     for (phy, inp) |*p, *i| {
         // Update camera
@@ -125,13 +161,6 @@ fn sys_PlayerUpdate(phy: []Physics, inp: []Input) void {
         const input_strafe: f32 = if (i.keys.d) 1 else if (i.keys.a) -1 else 0;
         const input_jump = i.keys.sp;
         
-        // Collision function for movement system
-        const CollisionContext = struct {
-            fn check_collision(aabb: bvh.AABB) bool {
-                return st.world.hit(aabb);
-            }
-        };
-        
         // Simple Quake movement
         movement.quake_movement(
             &p.pos,
@@ -142,12 +171,12 @@ fn sys_PlayerUpdate(phy: []Physics, inp: []Input) void {
             input_jump,
             i.yaw,
             dt,
-            CollisionContext.check_collision
+            world_collision_check
         );
         
         // Play jump sound
         if (input_jump and p.on_ground) {
-            st.jmp = true;
+            resources.jump_sound = true;
         }
     }
 }
@@ -184,34 +213,67 @@ const Renderer = struct {
     }
 };
 
-var st = struct { world: World = undefined, ren: Renderer = .{}, jmp: bool = false, t_jmp: f32 = 0, mem: std.mem.Allocator = undefined, store: ecs.Store(Entities) = undefined }{};
+// Global store - only one global needed now
+var store: ecs.Store(Registry, GameResources) = undefined;
 
 export fn init() void {
-    st.mem = std.heap.c_allocator;
-    sg.setup(.{ .environment = sokol.glue.environment() }); saudio.setup(.{ .stream_cb = audio }); simgui.setup(.{});
-    st.world = World.init(st.mem);
-    st.store = ecs.Store(Entities){ .registry = .{ .players = .{} } };
-    st.store.registry.players.append(st.mem, .{ 
+    const mem = std.heap.c_allocator;
+    sg.setup(.{ .environment = sokol.glue.environment() }); 
+    saudio.setup(.{ .stream_cb = audio }); 
+    simgui.setup(.{});
+    
+    var world = World.init(mem);
+    
+    // Build world
+    world.add(Vec3.new(0, -1, 0), Vec3.new(60, 2, 60), .{ 0.3, 0.3, 0.35, 1 }) catch {};
+    const walls = [_][6]f32{ .{30,5,0,2,10,60}, .{-30,5,0,2,10,60}, .{0,5,30,60,10,2}, .{0,5,-30,60,10,2}, .{0,5,0,4,10,4} };
+    for (walls) |d| world.add(Vec3.new(d[0], d[1], d[2]), Vec3.new(d[3], d[4], d[5]), .{ 0.5, 0.4, 0.3, 1 }) catch {};
+    for (0..4) |i| world.add(Vec3.new(10 + @as(f32,@floatFromInt(i)) * 2, 0.5 + @as(f32,@floatFromInt(i)), 10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    world.add(Vec3.new(18, 3.5, 10), Vec3.new(8, 1, 8), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    world.build() catch {}; 
+    world.bake() catch {};
+    
+    // Initialize store with resources
+    store = ecs.Store(Registry, GameResources){ 
+        .registry = .{ .players = .{} },
+        .resources = .{
+            .delta_time = 0.0,
+            .world = world,
+            .renderer = .{},
+            .jump_sound = false,
+            .jump_timer = 0.0,
+            .mem = mem,
+            .player_entity = undefined,
+        },
+    };
+    
+    // Set global reference for collision function
+    game_store = &store;
+    
+    // Initialize renderer
+    store.resources.renderer.init(&store.resources.world);
+    
+    // Create player entity using the new ECS
+    store.resources.player_entity = store.create(Player, mem, .{ 
         .physics = .{ .pos = Vec3.new(0, 5, -10), .vel = Vec3.zero() }, 
         .input = .{} 
-    }) catch {};
-    st.world.add(Vec3.new(0, -1, 0), Vec3.new(60, 2, 60), .{ 0.3, 0.3, 0.35, 1 }) catch {};
-    const walls = [_][6]f32{ .{30,5,0,2,10,60}, .{-30,5,0,2,10,60}, .{0,5,30,60,10,2}, .{0,5,-30,60,10,2}, .{0,5,0,4,10,4} };
-    for (walls) |d| st.world.add(Vec3.new(d[0], d[1], d[2]), Vec3.new(d[3], d[4], d[5]), .{ 0.5, 0.4, 0.3, 1 }) catch {};
-    for (0..4) |i| st.world.add(Vec3.new(10 + @as(f32,@floatFromInt(i)) * 2, 0.5 + @as(f32,@floatFromInt(i)), 10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    st.world.add(Vec3.new(18, 3.5, 10), Vec3.new(8, 1, 8), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    st.world.build() catch {}; st.world.bake() catch {}; st.ren.init(&st.world);
+    }) catch unreachable;
 }
 
 export fn frame() void {
-    st.store.run(sys_PlayerUpdate);
+    // Update delta time
+    store.resources.delta_time = @as(f32, @floatCast(sapp.frameDuration()));
+    
+    // Run systems using the new ECS
+    store.run(sys_PlayerUpdate);
+    
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
     
-    if (st.store.registry.players.items(.physics).len > 0) {
-        const player_physics = st.store.registry.players.items(.physics)[0];
-        const player_input = st.store.registry.players.items(.input)[0];
-        
-        st.ren.draw(get_view_matrix(player_physics, player_input));
+    // Get player components using the new unified get() method
+    if (store.get(store.resources.player_entity.id, *Physics)) |player_physics| {
+        if (store.get(store.resources.player_entity.id, *Input)) |player_input| {
+            store.resources.renderer.draw(get_view_matrix(player_physics.*, player_input.*));
+        }
     }
     
     const cx = @as(f32, @floatFromInt(sapp.width())) * 0.5; 
@@ -226,8 +288,8 @@ export fn frame() void {
 }
 
 export fn cleanup() void { 
-    st.world.deinit(); 
-    st.store.registry.players.deinit(st.mem); 
+    store.resources.world.deinit(); 
+    store.registry.players.deinit(store.resources.mem); 
     simgui.shutdown(); 
     saudio.shutdown(); 
     sg.shutdown(); 
@@ -235,9 +297,9 @@ export fn cleanup() void {
 
 export fn event(e: [*c]const sapp.Event) void {
     _ = simgui.handleEvent(e.*);
-    if (st.store.registry.players.items(.input).len == 0) return;
     
-    const inp = &st.store.registry.players.items(.input)[0];
+    // Get player input using the new unified get() method
+    const inp = store.get(store.resources.player_entity.id, *Input) orelse return;
     const d = e.*.type == .KEY_DOWN;
     
     switch (e.*.type) {
@@ -269,13 +331,27 @@ export fn event(e: [*c]const sapp.Event) void {
 
 fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
     for (0..@intCast(n)) |i| {
-        if (st.jmp) { st.jmp = false; st.t_jmp = 0.15; }
-        const s: f32 = if (st.t_jmp > 0) blk: {
-            const t = 1.0 - st.t_jmp / 0.15; st.t_jmp -= 1.0 / 44100.0;
-            break :blk @sin((0.15 - st.t_jmp) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
+        if (store.resources.jump_sound) { 
+            store.resources.jump_sound = false; 
+            store.resources.jump_timer = 0.15; 
+        }
+        const s: f32 = if (store.resources.jump_timer > 0) blk: {
+            const t = 1.0 - store.resources.jump_timer / 0.15; 
+            store.resources.jump_timer -= 1.0 / 44100.0;
+            break :blk @sin((0.15 - store.resources.jump_timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
         } else 0;
         for (0..@as(usize, @intCast(c))) |ch| buf[i * @as(usize, @intCast(c)) + ch] = s;
     }
 }
 
-pub fn main() void { sapp.run(.{ .init_cb = init, .frame_cb = frame, .cleanup_cb = cleanup, .event_cb = event, .width = 1024, .height = 768, .window_title = "FPS" }); }
+pub fn main() void { 
+    sapp.run(.{ 
+        .init_cb = init, 
+        .frame_cb = frame, 
+        .cleanup_cb = cleanup, 
+        .event_cb = event, 
+        .width = 1024, 
+        .height = 768, 
+        .window_title = "FPS - New ECS" 
+    }); 
+}
