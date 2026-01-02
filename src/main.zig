@@ -8,11 +8,13 @@ const ig = @import("cimgui");
 const math = @import("lib/math.zig");
 const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
-const bvh = @import("lib/bvh.zig");
+const world = @import("lib/world.zig");
+const brush_mod = @import("lib/brush.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
-const AABB = bvh.AABB;
+const AABB = brush_mod.AABB;
+const BrushWorld = world.BrushWorld;
 const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
 
 // Components
@@ -44,18 +46,15 @@ const GameResources = struct {
     vertex_count: u32 = 0,
     
     // Collision
-    bvh_tree: ?bvh.BVH(AABB, get_aabb) = null,
-    boxes: std.ArrayListUnmanaged(AABB) = .{},
+    brush_world: BrushWorld = undefined,
     
     // Geometry
     vertices: std.ArrayListUnmanaged(Vertex) = .{},
     indices: std.ArrayListUnmanaged(u16) = .{},
     
-    fn get_aabb(box: AABB) AABB { return box; }
-    
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.boxes = .{};
+        self.brush_world = BrushWorld.init(allocator);
         self.vertices = .{};
         self.indices = .{};
         
@@ -73,17 +72,17 @@ const GameResources = struct {
     }
     
     fn deinit(self: *@This()) void {
-        self.boxes.deinit(self.allocator);
+        self.brush_world.deinit();
         self.vertices.deinit(self.allocator);
         self.indices.deinit(self.allocator);
-        if (self.bvh_tree) |*tree| tree.deinit();
     }
     
     fn add_box(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
-        const half = Vec3.scale(size, 0.5);
-        const box = AABB{ .min = Vec3.sub(pos, half), .max = Vec3.add(pos, half) };
-        try self.boxes.append(self.allocator, box);
+        // Add brush to collision world
+        try self.brush_world.addBox(pos, size);
         
+        // Add visual geometry
+        const half = Vec3.scale(size, 0.5);
         const base = @as(u16, @intCast(self.vertices.items.len));
         const verts = [_][3]f32{ .{1,-1,-1}, .{-1,-1,-1}, .{-1,1,-1}, .{1,1,-1}, .{-1,-1,1}, .{1,-1,1}, .{1,1,1}, .{-1,1,1}, .{-1,-1,-1}, .{-1,-1,1}, .{-1,1,1}, .{-1,1,-1}, .{1,-1,1}, .{1,-1,-1}, .{1,1,-1}, .{1,1,1}, .{-1,-1,1}, .{-1,-1,-1}, .{1,-1,-1}, .{1,-1,1}, .{-1,1,-1}, .{-1,1,1}, .{1,1,1}, .{1,1,-1} };
         
@@ -101,8 +100,7 @@ const GameResources = struct {
     }
     
     fn build(self: *@This()) !void {
-        if (self.bvh_tree) |*tree| tree.deinit();
-        if (self.boxes.items.len > 0) self.bvh_tree = try bvh.BVH(AABB, get_aabb).init(self.allocator, self.boxes.items);
+        try self.brush_world.build();
         
         if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
         if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
@@ -111,10 +109,6 @@ const GameResources = struct {
             self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.indices.items.ptr, .size = self.indices.items.len * @sizeOf(u16) } });
         }
         self.vertex_count = @intCast(self.indices.items.len);
-    }
-    
-    fn hit(self: *const @This(), box: AABB) bool {
-        return if (self.bvh_tree) |*tree| tree.intersect(box) else false;
     }
     
     fn render(self: *const @This(), view: Mat4) void {
@@ -140,19 +134,29 @@ fn sys_input(inputs: []Input, resources: *GameResources) void {
 fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, resources: *GameResources) void {
     const dt = resources.delta_time;
     const size = Vec3.new(0.98, 1.8, 0.98);
+    const player_aabb = AABB.fromCenterSize(Vec3.zero(), size);
     
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
         const fwd: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
         const side: f32 = if (i.keys.d) 1 else if (i.keys.a) -1 else 0;
         const jump = i.keys.sp;
         
+        // Apply gravity
         p.vel.data[1] -= 12.0 * dt;
-        if (jump and p.on_ground) { p.vel.data[1] = 4.0; a.timer = 0.15; a.active = true; }
         
+        // Jump if on ground
+        if (jump and p.on_ground) { 
+            p.vel.data[1] = 4.0; 
+            a.timer = 0.15; 
+            a.active = true; 
+        }
+        
+        // Calculate desired movement direction
         var dir = Vec3.zero();
         if (side != 0) dir = Vec3.add(dir, Vec3.scale(Vec3.new(@cos(i.yaw), 0, @sin(i.yaw)), side));
         if (fwd != 0) dir = Vec3.add(dir, Vec3.scale(Vec3.new(@sin(i.yaw), 0, -@cos(i.yaw)), fwd));
         
+        // Apply movement acceleration
         const len = @sqrt(dir.data[0] * dir.data[0] + dir.data[2] * dir.data[2]);
         if (len > 0.001) {
             const wish = Vec3.scale(dir, 1.0 / len);
@@ -166,28 +170,48 @@ fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, aud
             }
         }
         
+        // Apply friction when on ground
         if (p.on_ground) {
             const speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
             if (speed > 0.1) {
                 const factor = @max(0, speed - @max(speed, 0.1) * 5.0 * dt) / speed;
-                p.vel.data[0] *= factor; p.vel.data[2] *= factor;
-            } else { p.vel.data[0] = 0; p.vel.data[2] = 0; }
+                p.vel.data[0] *= factor; 
+                p.vel.data[2] *= factor;
+            } else { 
+                p.vel.data[0] = 0; 
+                p.vel.data[2] = 0; 
+            }
         }
         
-        var hit = false;
-        inline for (0..3) |axis| {
-            const old = t.pos.data[axis];
-            t.pos.data[axis] += p.vel.data[axis] * dt;
-            const half = Vec3.scale(size, 0.5);
-            const bbox = AABB{ .min = Vec3.sub(t.pos, half), .max = Vec3.add(t.pos, half) };
-            if (resources.hit(bbox)) { t.pos.data[axis] = old; p.vel.data[axis] = 0; hit = true; }
+        // Simple movement with collision
+        const delta = Vec3.scale(p.vel, dt);
+        const old_pos = t.pos;
+        const new_pos = resources.brush_world.movePlayer(t.pos, delta, player_aabb);
+        
+        // Only update velocity components that were blocked by collision
+        const actual_delta = Vec3.sub(new_pos, old_pos);
+        
+        // If we couldn't move in a direction, zero that velocity component
+        if (@abs(delta.data[0]) > 0.001 and @abs(actual_delta.data[0]) < 0.001) {
+            p.vel.data[0] = 0;
+        }
+        if (@abs(delta.data[1]) > 0.001 and @abs(actual_delta.data[1]) < 0.001) {
+            p.vel.data[1] = 0;
+        }
+        if (@abs(delta.data[2]) > 0.001 and @abs(actual_delta.data[2]) < 0.001) {
+            p.vel.data[2] = 0;
         }
         
-        p.on_ground = hit and p.vel.data[1] <= 0.01 and blk: {
-            const test_pos = Vec3.new(t.pos.data[0], t.pos.data[1] - 0.01, t.pos.data[2]);
-            const half = Vec3.scale(size, 0.5);
-            break :blk resources.hit(AABB{ .min = Vec3.sub(test_pos, half), .max = Vec3.add(test_pos, half) });
+        // Check if we're on ground by testing slightly below
+        const ground_test_pos = Vec3.new(new_pos.data[0], new_pos.data[1] - 0.1, new_pos.data[2]);
+        const ground_aabb = AABB{
+            .min = Vec3.add(ground_test_pos, player_aabb.min),
+            .max = Vec3.add(ground_test_pos, player_aabb.max)
         };
+        
+        p.on_ground = resources.brush_world.testCollision(ground_aabb) and p.vel.data[1] <= 0.1;
+        
+        t.pos = new_pos;
     }
 }
 
@@ -228,7 +252,7 @@ export fn init() void {
     
     // Player
     store.resources.player_entity = store.create(Player, allocator, .{
-        .transform = .{ .pos = Vec3.new(0, 5, -10) },
+        .transform = .{ .pos = Vec3.new(0, 10, -10) },
         .physics = .{}, .input = .{}, .audio = .{},
     }) catch unreachable;
     
