@@ -46,39 +46,81 @@ pub fn BVH(comptime T: type, comptime get_aabb: fn(T) AABB) type {
                 box = box.union_with(get_aabb(self.items[self.indices.items[first + i]]));
             }
             
-            if (count <= 2) {
+            if (count <= 4) { // Larger leaves for better performance
                 return self.nodes.append(self.mem, .{ .box = box, .first = first, .count = count });
             }
             
-            // Simple longest axis splitting
-            const size = Vec3.sub(box.max, box.min);
-            const axis: usize = if (size.data[0] > size.data[1] and size.data[0] > size.data[2]) 0 
-                               else if (size.data[1] > size.data[2]) 1 else 2;
-            const mid = box.min.data[axis] + size.data[axis] * 0.5;
+            // Full SAH: try all axes and all split positions
+            var best_cost: f32 = std.math.floatMax(f32);
+            var best_axis: usize = 0;
+            var best_split: u32 = count / 2;
             
-            // Partition around midpoint
-            var i: u32 = 0; 
-            var j: u32 = count;
-            while (i < j) {
-                const idx = self.indices.items[first + i];
-                const centroid = Vec3.scale(Vec3.add(get_aabb(self.items[idx]).min, get_aabb(self.items[idx]).max), 0.5);
-                if (centroid.data[axis] < mid) {
-                    i += 1;
-                } else {
-                    j -= 1;
-                    std.mem.swap(u32, &self.indices.items[first + i], &self.indices.items[first + j]);
+            for (0..3) |axis| {
+                // Sort by centroid on this axis
+                self.sortByAxis(first, count, axis);
+                
+                // Try every split position
+                for (1..count) |split| {
+                    const cost = self.sahCost(first, count, @intCast(split));
+                    if (cost < best_cost) {
+                        best_cost = cost;
+                        best_axis = axis;
+                        best_split = @intCast(split);
+                    }
                 }
             }
             
-            const left_count = if (i == 0 or i == count) count / 2 else i;
+            // Apply best split
+            self.sortByAxis(first, count, best_axis);
+            
             const node_idx = @as(u32, @intCast(self.nodes.items.len));
             try self.nodes.append(self.mem, .{ .box = box });
             
             self.nodes.items[node_idx].left = @intCast(self.nodes.items.len);
-            try self.split(first, left_count);
+            try self.split(first, best_split);
             
             self.nodes.items[node_idx].right = @intCast(self.nodes.items.len);
-            try self.split(first + left_count, count - left_count);
+            try self.split(first + best_split, count - best_split);
+        }
+        
+        fn sortByAxis(self: *Self, first: u32, count: u32, axis: usize) void {
+            const slice = self.indices.items[first..first + count];
+            const Context = struct {
+                items: []T,
+                axis: usize,
+                
+                fn lessThan(ctx: @This(), a: u32, b: u32) bool {
+                    const a_box = get_aabb(ctx.items[a]);
+                    const b_box = get_aabb(ctx.items[b]);
+                    const a_center = Vec3.scale(Vec3.add(a_box.min, a_box.max), 0.5);
+                    const b_center = Vec3.scale(Vec3.add(b_box.min, b_box.max), 0.5);
+                    return a_center.data[ctx.axis] < b_center.data[ctx.axis];
+                }
+            };
+            
+            const context = Context{ .items = self.items, .axis = axis };
+            std.mem.sort(u32, slice, context, Context.lessThan);
+        }
+        
+        fn sahCost(self: *Self, first: u32, count: u32, split: u32) f32 {
+            // Calculate bounding boxes for left and right sides
+            var left_box = get_aabb(self.items[self.indices.items[first]]);
+            for (1..split) |i| {
+                left_box = left_box.union_with(get_aabb(self.items[self.indices.items[first + i]]));
+            }
+            
+            var right_box = get_aabb(self.items[self.indices.items[first + split]]);
+            for (split + 1..count) |i| {
+                right_box = right_box.union_with(get_aabb(self.items[self.indices.items[first + i]]));
+            }
+            
+            // SAH cost = surface_area_left * count_left + surface_area_right * count_right
+            const left_area = left_box.surface_area();
+            const right_area = right_box.surface_area();
+            const left_count = @as(f32, @floatFromInt(split));
+            const right_count = @as(f32, @floatFromInt(count - split));
+            
+            return left_area * left_count + right_area * right_count;
         }
         
         pub fn intersect(self: *const Self, query: AABB) bool {
