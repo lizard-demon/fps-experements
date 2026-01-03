@@ -61,7 +61,122 @@ pub const Brush = struct {
         }
         return true;
     }
+    
+    // Sweep an AABB through this brush - returns exact collision point
+    pub fn sweepAABB(self: Brush, start: Vec3, delta: Vec3, aabb: AABB) SweepResult {
+        // Early rejection using expanded bounding box
+        const expanded_bounds = AABB{
+            .min = Vec3.sub(self.bounds.min, Vec3.sub(aabb.max, aabb.min)),
+            .max = Vec3.sub(self.bounds.max, Vec3.sub(aabb.min, aabb.max)),
+        };
+        
+        const ray_result = raycastAABB(start, delta, expanded_bounds);
+        if (!ray_result.hit) {
+            return SweepResult.miss(Vec3.add(start, delta));
+        }
+        
+        // Test against each plane
+        var closest_fraction: f32 = 1.0;
+        var closest_normal = Vec3.zero();
+        var closest_plane_index: u32 = 0;
+        var found_hit = false;
+        
+        for (self.planes, 0..) |plane, i| {
+            const result = sweepAABBPlane(start, delta, aabb, plane);
+            if (result.hit and result.fraction < closest_fraction) {
+                closest_fraction = result.fraction;
+                closest_normal = result.normal;
+                closest_plane_index = @intCast(i);
+                found_hit = true;
+            }
+        }
+        
+        if (found_hit) {
+            const hit_pos = Vec3.add(start, Vec3.scale(delta, closest_fraction));
+            return SweepResult.collision(closest_fraction, closest_normal, hit_pos, closest_plane_index);
+        }
+        
+        return SweepResult.miss(Vec3.add(start, delta));
+    }
 };
+
+// Core sweep collision functions - mathematically precise
+fn raycastAABB(start: Vec3, delta: Vec3, aabb: AABB) SweepResult {
+    // Ray-AABB intersection using slab method
+    var t_min: f32 = 0.0;
+    var t_max: f32 = 1.0;
+    
+    for (0..3) |axis| {
+        if (@abs(delta.data[axis]) < EPSILON) {
+            // Ray is parallel to slab
+            if (start.data[axis] < aabb.min.data[axis] or start.data[axis] > aabb.max.data[axis]) {
+                return SweepResult.miss(Vec3.add(start, delta));
+            }
+        } else {
+            // Calculate intersection distances
+            const inv_dir = 1.0 / delta.data[axis];
+            var t1 = (aabb.min.data[axis] - start.data[axis]) * inv_dir;
+            var t2 = (aabb.max.data[axis] - start.data[axis]) * inv_dir;
+            
+            if (t1 > t2) {
+                const temp = t1;
+                t1 = t2;
+                t2 = temp;
+            }
+            
+            t_min = @max(t_min, t1);
+            t_max = @min(t_max, t2);
+            
+            if (t_min > t_max) {
+                return SweepResult.miss(Vec3.add(start, delta));
+            }
+        }
+    }
+    
+    if (t_min >= 0.0 and t_min <= 1.0) {
+        const hit_pos = Vec3.add(start, Vec3.scale(delta, t_min));
+        return SweepResult.collision(t_min, Vec3.zero(), hit_pos, 0);
+    }
+    
+    return SweepResult.miss(Vec3.add(start, delta));
+}
+
+fn sweepAABBPlane(start: Vec3, delta: Vec3, aabb: AABB, plane: Plane) SweepResult {
+    // Calculate AABB extents projected onto plane normal
+    const extents = Vec3.scale(Vec3.sub(aabb.max, aabb.min), 0.5);
+    const radius = @abs(plane.normal.data[0] * extents.data[0]) +
+                   @abs(plane.normal.data[1] * extents.data[1]) +
+                   @abs(plane.normal.data[2] * extents.data[2]);
+    
+    // AABB center relative to plane
+    const center = Vec3.add(start, Vec3.scale(Vec3.add(aabb.min, aabb.max), 0.5));
+    const dist_to_plane = plane.distanceToPoint(center);
+    
+    // Velocity component along plane normal
+    const velocity_dot = Vec3.dot(delta, plane.normal);
+    
+    // If moving away from plane or parallel, no collision
+    if (velocity_dot >= -EPSILON) {
+        return SweepResult.miss(Vec3.add(start, delta));
+    }
+    
+    // Calculate intersection time
+    const adjusted_distance = dist_to_plane - radius;
+    
+    // Already intersecting
+    if (adjusted_distance <= EPSILON) {
+        return SweepResult.collision(0.0, plane.normal, start, 0);
+    }
+    
+    const t = -adjusted_distance / velocity_dot;
+    
+    if (t >= 0.0 and t <= 1.0) {
+        const hit_pos = Vec3.add(start, Vec3.scale(delta, t));
+        return SweepResult.collision(t, plane.normal, hit_pos, 0);
+    }
+    
+    return SweepResult.miss(Vec3.add(start, delta));
+}
 
 // Factory for creating common brush shapes
 pub const BrushFactory = struct {
@@ -130,6 +245,35 @@ fn calculateBounds(planes: []const Plane) AABB {
     return AABB.new(min, max);
 }
 
+// Sweep collision result - precise continuous collision detection
+pub const SweepResult = struct {
+    hit: bool,
+    fraction: f32,      // 0.0 to 1.0, how far along the sweep we got
+    normal: Vec3,       // surface normal at impact point
+    position: Vec3,     // exact contact position
+    plane_index: u32,   // which plane we hit (for debugging)
+    
+    pub fn miss(end_position: Vec3) SweepResult {
+        return .{
+            .hit = false,
+            .fraction = 1.0,
+            .normal = Vec3.zero(),
+            .position = end_position,
+            .plane_index = 0,
+        };
+    }
+    
+    pub fn collision(fraction: f32, normal: Vec3, position: Vec3, plane_index: u32) SweepResult {
+        return .{
+            .hit = true,
+            .fraction = fraction,
+            .normal = normal,
+            .position = position,
+            .plane_index = plane_index,
+        };
+    }
+};
+
 // Movement result with detailed collision information
 pub const MoveResult = struct {
     position: Vec3,
@@ -170,6 +314,20 @@ pub const World = struct {
             if (brush.intersects(aabb)) return true;
         }
         return false;
+    }
+    
+    // Sweep an AABB through the world - returns first collision
+    pub fn sweepAABB(self: *const World, start: Vec3, delta: Vec3, aabb: AABB) SweepResult {
+        var closest_result = SweepResult.miss(Vec3.add(start, delta));
+        
+        for (self.brushes.items) |brush| {
+            const result = brush.sweepAABB(start, delta, aabb);
+            if (result.hit and result.fraction < closest_result.fraction) {
+                closest_result = result;
+            }
+        }
+        
+        return closest_result;
     }
     
     // Quake-style player movement with step-up and wall sliding
