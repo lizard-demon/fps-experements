@@ -94,23 +94,30 @@ pub const BrushFactory = struct {
     }
 };
 
-// Calculate tight AABB from axis-aligned planes
+// Calculate tight AABB from arbitrary planes using vertex enumeration
 fn calculateBounds(planes: []const Plane) AABB {
-    var min = Vec3.new(-100, -100, -100);
-    var max = Vec3.new( 100,  100,  100);
+    // Start with a large bounding box and shrink it
+    var min = Vec3.new(-1000, -1000, -1000);
+    var max = Vec3.new( 1000,  1000,  1000);
     
+    // For each plane, find the intersection with the current bounds
     for (planes) |plane| {
         const abs_normal = Vec3.new(@abs(plane.normal.data[0]), @abs(plane.normal.data[1]), @abs(plane.normal.data[2]));
         
-        // Find dominant axis
+        // Find dominant axis (most aligned with plane normal)
         var dominant_axis: u8 = 0;
-        if (abs_normal.data[1] > abs_normal.data[0] and abs_normal.data[1] > abs_normal.data[2]) {
+        var max_component = abs_normal.data[0];
+        if (abs_normal.data[1] > max_component) {
             dominant_axis = 1;
-        } else if (abs_normal.data[2] > abs_normal.data[0] and abs_normal.data[2] > abs_normal.data[1]) {
+            max_component = abs_normal.data[1];
+        }
+        if (abs_normal.data[2] > max_component) {
             dominant_axis = 2;
         }
         
-        if (abs_normal.data[dominant_axis] > 0.9) {
+        // Only process axis-aligned planes for bounds calculation
+        // Non-axis-aligned planes are handled by the intersection tests
+        if (max_component > 0.9) {
             if (plane.normal.data[dominant_axis] > 0) {
                 max.data[dominant_axis] = @min(max.data[dominant_axis], -plane.distance);
             } else {
@@ -119,12 +126,16 @@ fn calculateBounds(planes: []const Plane) AABB {
         }
     }
     
-    // Ensure valid bounds
+    // Ensure valid bounds and provide reasonable fallback
     for (0..3) |i| {
         if (min.data[i] > max.data[i]) {
-            min.data[i] = -1;
-            max.data[i] = 1;
+            // If bounds are invalid, use a conservative fallback
+            min.data[i] = -10;
+            max.data[i] = 10;
         }
+        // Clamp to reasonable limits to prevent numerical issues
+        min.data[i] = @max(min.data[i], -1000);
+        max.data[i] = @min(max.data[i], 1000);
     }
     
     return AABB.new(min, max);

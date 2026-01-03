@@ -150,11 +150,12 @@ pub const MeshBuilder = struct {
             polygon.* = output;
         }
         
+        const epsilon: f32 = 0.001;
         var prev_vert = polygon.items[polygon.items.len - 1];
-        var prev_inside = plane.distanceToPoint(prev_vert) <= 0.001;
+        var prev_inside = plane.distanceToPoint(prev_vert) <= epsilon;
         
         for (polygon.items) |curr_vert| {
-            const curr_inside = plane.distanceToPoint(curr_vert) <= 0.001;
+            const curr_inside = plane.distanceToPoint(curr_vert) <= epsilon;
             
             if (curr_inside) {
                 if (!prev_inside) {
@@ -174,6 +175,11 @@ pub const MeshBuilder = struct {
             prev_vert = curr_vert;
             prev_inside = curr_inside;
         }
+        
+        // Filter out degenerate polygons (less than 3 vertices)
+        if (output.items.len < 3) {
+            output.clearAndFree(self.allocator);
+        }
     }
     
     fn intersectLine(self: *MeshBuilder, start: Vec3, end: Vec3, plane: Plane) ?Vec3 {
@@ -181,9 +187,14 @@ pub const MeshBuilder = struct {
         const dir = Vec3.sub(end, start);
         const denom = Vec3.dot(plane.normal, dir);
         
-        if (@abs(denom) < 0.001) return null;
+        const epsilon: f32 = 0.001;
+        if (@abs(denom) < epsilon) return null; // Line is parallel to plane
         
         const t = -(plane.distanceToPoint(start)) / denom;
+        
+        // Ensure intersection is within line segment (with small tolerance)
+        if (t < -epsilon or t > 1.0 + epsilon) return null;
+        
         return Vec3.add(start, Vec3.scale(dir, t));
     }
 };

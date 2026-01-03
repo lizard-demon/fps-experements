@@ -110,7 +110,8 @@ const GameResources = struct {
             self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.mesh_builder.vertices.items.ptr, .size = self.mesh_builder.vertices.items.len * @sizeOf(mesh.Vertex) } });
             self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.mesh_builder.indices.items.ptr, .size = self.mesh_builder.indices.items.len * @sizeOf(u16) } });
         }
-        self.vertex_count = @intCast(self.mesh_builder.indices.items.len);
+        // Use saturating cast to prevent overflow
+        self.vertex_count = std.math.cast(u32, self.mesh_builder.indices.items.len) orelse std.math.maxInt(u32);
     }
     
     fn render(self: *const @This(), view: Mat4) void {
@@ -161,26 +162,49 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // Build world
-    store.resources.addBox(Vec3.new(0, -1, 0), Vec3.new(40, 2, 40), .{ 0.3, 0.3, 0.35, 1 }) catch {};
-    store.resources.addBox(Vec3.new(20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {};
-    store.resources.addBox(Vec3.new(-20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {};
-    store.resources.addBox(Vec3.new(0, 5, 20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {};
-    store.resources.addBox(Vec3.new(0, 5, -20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {};
+    // Build world - handle errors gracefully
+    store.resources.addBox(Vec3.new(0, -1, 0), Vec3.new(40, 2, 40), .{ 0.3, 0.3, 0.35, 1 }) catch |err| {
+        std.log.err("Failed to add ground box: {}", .{err});
+    };
+    store.resources.addBox(Vec3.new(20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
+        std.log.err("Failed to add wall box: {}", .{err});
+    };
+    store.resources.addBox(Vec3.new(-20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
+        std.log.err("Failed to add wall box: {}", .{err});
+    };
+    store.resources.addBox(Vec3.new(0, 5, 20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
+        std.log.err("Failed to add wall box: {}", .{err});
+    };
+    store.resources.addBox(Vec3.new(0, 5, -20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
+        std.log.err("Failed to add wall box: {}", .{err});
+    };
     
-    store.resources.addBox(Vec3.new(-10, 0.5, -10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    store.resources.addBox(Vec3.new(-10, 1.5, -6), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
-    store.resources.addBox(Vec3.new(-10, 2.5, -2), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    store.resources.addBox(Vec3.new(-10, 0.5, -10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch |err| {
+        std.log.err("Failed to add platform box: {}", .{err});
+    };
+    store.resources.addBox(Vec3.new(-10, 1.5, -6), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch |err| {
+        std.log.err("Failed to add platform box: {}", .{err});
+    };
+    store.resources.addBox(Vec3.new(-10, 2.5, -2), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch |err| {
+        std.log.err("Failed to add platform box: {}", .{err});
+    };
     
-    store.resources.addSlope(Vec3.new(10, 0, 0), Vec3.new(8, 6, 8), 30.0, .{ 0.2, 0.6, 0.2, 1 }) catch {};
+    store.resources.addSlope(Vec3.new(10, 0, 0), Vec3.new(8, 6, 8), 30.0, .{ 0.2, 0.6, 0.2, 1 }) catch |err| {
+        std.log.err("Failed to add slope: {}", .{err});
+    };
     
-    store.resources.build() catch {};
+    store.resources.build() catch |err| {
+        std.log.err("Failed to build mesh: {}", .{err});
+    };
     
     // Create player
     store.resources.player_entity = store.create(Player, allocator, .{
         .transform = .{ .pos = Vec3.new(0, 2, 0) },
         .physics = .{}, .input = .{}, .audio = .{},
-    }) catch unreachable;
+    }) catch |err| {
+        std.log.err("Failed to create player entity: {}", .{err});
+        return; // Graceful failure - game will not initialize but won't crash
+    };
     
     initialized = true;
 }
@@ -211,8 +235,15 @@ export fn cleanup() void {
 }
 
 export fn event(e: [*c]const sapp.Event) void {
+    // Validate event pointer
+    if (e == null) return;
+    
     _ = simgui.handleEvent(e.*);
+    
+    // Ensure player entity exists before accessing input
+    if (!initialized) return;
     const inp = store.get(store.resources.player_entity.id, *Input) orelse return;
+    
     const d = e.*.type == .KEY_DOWN;
     
     switch (e.*.type) {
@@ -228,20 +259,32 @@ export fn event(e: [*c]const sapp.Event) void {
 }
 
 fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
-    if (!initialized) { for (0..@intCast(n * c)) |i| buf[i] = 0; return; }
+    // Validate parameters to prevent overflow and invalid access
+    if (n <= 0 or c <= 0) return;
+    
+    // Check for potential overflow in multiplication
+    const n_usize: usize = @intCast(n);
+    const c_usize: usize = @intCast(c);
+    const total_samples = std.math.mul(usize, n_usize, c_usize) catch return;
+    
+    if (!initialized) { 
+        for (0..total_samples) |i| buf[i] = 0; 
+        return; 
+    }
     
     const sources = store.registry.players.items(.audio);
-    for (0..@intCast(n)) |f| {
+    for (0..n_usize) |f| {
         var sample: f32 = 0;
         for (sources) |*s| {
             if (s.active and s.timer > 0) {
-                const t = 1.0 - s.timer / 0.15;
+                const sound_duration = 0.15; // Should match physics config
+                const t = 1.0 - s.timer / sound_duration;
                 s.timer -= 1.0 / 44100.0;
-                sample += @sin((0.15 - s.timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
+                sample += @sin((sound_duration - s.timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
                 if (s.timer <= 0) s.active = false;
             }
         }
-        for (0..@as(usize, @intCast(c))) |ch| buf[f * @as(usize, @intCast(c)) + ch] = sample;
+        for (0..c_usize) |ch| buf[f * c_usize + ch] = sample;
     }
 }
 
