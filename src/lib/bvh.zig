@@ -60,12 +60,12 @@ pub fn BVH(comptime T: type, comptime get_aabb: fn(T) AABB) type {
                 self.sortByAxis(first, count, axis);
                 
                 // Try every split position
-                for (1..count) |split| {
-                    const cost = self.sahCost(first, count, @intCast(split));
+                for (1..count) |split_idx| {
+                    const cost = self.sahCost(first, count, @intCast(split_idx));
                     if (cost < best_cost) {
                         best_cost = cost;
                         best_axis = axis;
-                        best_split = @intCast(split);
+                        best_split = @intCast(split_idx);
                     }
                 }
             }
@@ -102,28 +102,32 @@ pub fn BVH(comptime T: type, comptime get_aabb: fn(T) AABB) type {
             std.mem.sort(u32, slice, context, Context.lessThan);
         }
         
-        fn sahCost(self: *Self, first: u32, count: u32, split: u32) f32 {
+        fn sahCost(self: *Self, first: u32, count: u32, split_pos: u32) f32 {
             // Calculate bounding boxes for left and right sides
             var left_box = get_aabb(self.items[self.indices.items[first]]);
-            for (1..split) |i| {
+            for (1..split_pos) |i| {
                 left_box = left_box.union_with(get_aabb(self.items[self.indices.items[first + i]]));
             }
             
-            var right_box = get_aabb(self.items[self.indices.items[first + split]]);
-            for (split + 1..count) |i| {
+            var right_box = get_aabb(self.items[self.indices.items[first + split_pos]]);
+            for (split_pos + 1..count) |i| {
                 right_box = right_box.union_with(get_aabb(self.items[self.indices.items[first + i]]));
             }
             
             // SAH cost = surface_area_left * count_left + surface_area_right * count_right
             const left_area = left_box.surface_area();
             const right_area = right_box.surface_area();
-            const left_count = @as(f32, @floatFromInt(split));
-            const right_count = @as(f32, @floatFromInt(count - split));
+            const left_count = @as(f32, @floatFromInt(split_pos));
+            const right_count = @as(f32, @floatFromInt(count - split_pos));
             
             return left_area * left_count + right_area * right_count;
         }
         
-        pub fn intersect(self: *const Self, query: AABB) bool {
+        pub fn query(self: *const Self, query_aabb: AABB) bool {
+            return self.intersect(query_aabb);
+        }
+        
+        pub fn intersect(self: *const Self, query_aabb: AABB) bool {
             if (self.nodes.items.len == 0) return false;
             
             var stack: [64]u32 = undefined;
@@ -133,11 +137,11 @@ pub fn BVH(comptime T: type, comptime get_aabb: fn(T) AABB) type {
             while (sp > 0) {
                 sp -= 1;
                 const node = self.nodes.items[stack[sp]];
-                if (!query.hit(node.box)) continue;
+                if (!query_aabb.hit(node.box)) continue;
                 
                 if (node.left == 0) {
                     for (0..node.count) |i| {
-                        if (query.hit(get_aabb(self.items[self.indices.items[node.first + i]]))) {
+                        if (query_aabb.hit(get_aabb(self.items[self.indices.items[node.first + i]]))) {
                             return true;
                         }
                     }

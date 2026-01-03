@@ -2,6 +2,7 @@ const std = @import("std");
 const math = @import("math.zig");
 
 const Vec3 = math.Vec3;
+const EPSILON = math.EPSILON;
 
 pub const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
 
@@ -150,12 +151,11 @@ pub const MeshBuilder = struct {
             polygon.* = output;
         }
         
-        const epsilon: f32 = 0.001;
         var prev_vert = polygon.items[polygon.items.len - 1];
-        var prev_inside = plane.distanceToPoint(prev_vert) <= epsilon;
+        var prev_inside = plane.distanceToPoint(prev_vert) <= EPSILON;
         
         for (polygon.items) |curr_vert| {
-            const curr_inside = plane.distanceToPoint(curr_vert) <= epsilon;
+            const curr_inside = plane.distanceToPoint(curr_vert) <= EPSILON;
             
             if (curr_inside) {
                 if (!prev_inside) {
@@ -187,13 +187,12 @@ pub const MeshBuilder = struct {
         const dir = Vec3.sub(end, start);
         const denom = Vec3.dot(plane.normal, dir);
         
-        const epsilon: f32 = 0.001;
-        if (@abs(denom) < epsilon) return null; // Line is parallel to plane
+        if (@abs(denom) < EPSILON) return null; // Line is parallel to plane
         
         const t = -(plane.distanceToPoint(start)) / denom;
         
         // Ensure intersection is within line segment (with small tolerance)
-        if (t < -epsilon or t > 1.0 + epsilon) return null;
+        if (t < -EPSILON or t > 1.0 + EPSILON) return null;
         
         return Vec3.add(start, Vec3.scale(dir, t));
     }

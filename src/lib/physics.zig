@@ -5,6 +5,7 @@ const collision = @import("collision.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 const World = collision.World;
+const EPSILON = math.EPSILON;
 
 // Physics configuration - all tunable constants in one place
 pub const PhysicsConfig = struct {

@@ -1,12 +1,20 @@
 // Quake-style brush collision system
 const std = @import("std");
 const math = @import("math.zig");
+const bvh_mod = @import("bvh.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
+const BVH = bvh_mod.BVH;
 
-pub const EPSILON: f32 = 0.001;
-pub const STEP_HEIGHT: f32 = 0.25;
-pub const GROUND_SNAP: f32 = 0.05;
+// Use centralized constants
+const EPSILON = math.EPSILON;
+const STEP_HEIGHT = math.STEP_HEIGHT;
+const GROUND_SNAP = math.GROUND_SNAP;
+
+// BVH helper function
+fn getBrushAABB(brush: Brush) AABB {
+    return brush.bounds;
+}
 
 // Core geometric primitive: a plane in 3D space
 pub const Plane = struct {
@@ -54,13 +62,6 @@ pub const Brush = struct {
         }
         return true;
     }
-    
-    pub fn contains(self: Brush, point: Vec3) bool {
-        for (self.planes) |plane| {
-            if (plane.isInFront(point)) return false;
-        }
-        return true;
-    }
 };
 
 // Factory for creating common brush shapes
@@ -83,6 +84,25 @@ pub const BrushFactory = struct {
         return Brush.new(planes, AABB.new(min, max));
     }
     
+    pub fn createSlope(self: BrushFactory, center: Vec3, size: Vec3, angle_degrees: f32) !Brush {
+        const angle_rad = angle_degrees * std.math.pi / 180.0;
+        const half_size = Vec3.scale(size, 0.5);
+        
+        var planes = try self.allocator.alloc(Plane, 5);
+        planes[0] = Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
+        
+        const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
+        const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
+        planes[1] = Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
+        
+        planes[2] = Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
+        planes[3] = Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
+        planes[4] = Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
+        
+        const bounds = calculateBounds(planes);
+        return Brush.new(planes, bounds);
+    }
+    
     pub fn createFromPlanes(self: BrushFactory, planes: []const Plane) !Brush {
         const owned_planes = try self.allocator.dupe(Plane, planes);
         const bounds = calculateBounds(owned_planes);
@@ -94,48 +114,36 @@ pub const BrushFactory = struct {
     }
 };
 
-// Calculate tight AABB from arbitrary planes using vertex enumeration
+// Simple bounds calculation - conservative but fast
 fn calculateBounds(planes: []const Plane) AABB {
-    // Start with a large bounding box and shrink it
-    var min = Vec3.new(-1000, -1000, -1000);
-    var max = Vec3.new( 1000,  1000,  1000);
+    var min = Vec3.new(-50, -50, -50);
+    var max = Vec3.new( 50,  50,  50);
     
-    // For each plane, find the intersection with the current bounds
+    // For axis-aligned planes, tighten bounds
     for (planes) |plane| {
-        const abs_normal = Vec3.new(@abs(plane.normal.data[0]), @abs(plane.normal.data[1]), @abs(plane.normal.data[2]));
+        const n = plane.normal;
+        const d = plane.distance;
         
-        // Find dominant axis (most aligned with plane normal)
-        var dominant_axis: u8 = 0;
-        var max_component = abs_normal.data[0];
-        if (abs_normal.data[1] > max_component) {
-            dominant_axis = 1;
-            max_component = abs_normal.data[1];
-        }
-        if (abs_normal.data[2] > max_component) {
-            dominant_axis = 2;
-        }
-        
-        // Only process axis-aligned planes for bounds calculation
-        // Non-axis-aligned planes are handled by the intersection tests
-        if (max_component > 0.9) {
-            if (plane.normal.data[dominant_axis] > 0) {
-                max.data[dominant_axis] = @min(max.data[dominant_axis], -plane.distance);
+        // Check if plane is axis-aligned (within tolerance)
+        if (@abs(n.data[0]) > 0.9 and @abs(n.data[1]) < 0.1 and @abs(n.data[2]) < 0.1) {
+            if (n.data[0] > 0) {
+                max.data[0] = @min(max.data[0], -d);
             } else {
-                min.data[dominant_axis] = @max(min.data[dominant_axis], plane.distance);
+                min.data[0] = @max(min.data[0], d);
+            }
+        } else if (@abs(n.data[1]) > 0.9 and @abs(n.data[0]) < 0.1 and @abs(n.data[2]) < 0.1) {
+            if (n.data[1] > 0) {
+                max.data[1] = @min(max.data[1], -d);
+            } else {
+                min.data[1] = @max(min.data[1], d);
+            }
+        } else if (@abs(n.data[2]) > 0.9 and @abs(n.data[0]) < 0.1 and @abs(n.data[1]) < 0.1) {
+            if (n.data[2] > 0) {
+                max.data[2] = @min(max.data[2], -d);
+            } else {
+                min.data[2] = @max(min.data[2], d);
             }
         }
-    }
-    
-    // Ensure valid bounds and provide reasonable fallback
-    for (0..3) |i| {
-        if (min.data[i] > max.data[i]) {
-            // If bounds are invalid, use a conservative fallback
-            min.data[i] = -10;
-            max.data[i] = 10;
-        }
-        // Clamp to reasonable limits to prevent numerical issues
-        min.data[i] = @max(min.data[i], -1000);
-        max.data[i] = @min(max.data[i], 1000);
     }
     
     return AABB.new(min, max);
@@ -153,6 +161,7 @@ pub const MoveResult = struct {
 // World containing brushes with spatial queries
 pub const World = struct {
     brushes: std.ArrayListUnmanaged(Brush) = .{},
+    bvh: ?BVH(Brush, getBrushAABB) = null,
     factory: BrushFactory,
     
     pub fn init(allocator: std.mem.Allocator) World {
@@ -164,10 +173,16 @@ pub const World = struct {
             self.factory.destroy(brush);
         }
         self.brushes.deinit(self.factory.allocator);
+        if (self.bvh) |*bvh| bvh.deinit();
     }
     
     pub fn addBrush(self: *World, brush: Brush) !void {
         try self.brushes.append(self.factory.allocator, brush);
+        // Rebuild BVH for large worlds
+        if (self.brushes.items.len > 10) {
+            if (self.bvh) |*bvh| bvh.deinit();
+            self.bvh = try BVH(Brush, getBrushAABB).init(self.factory.allocator, self.brushes.items);
+        }
     }
     
     pub fn addBox(self: *World, center: Vec3, size: Vec3) !void {
@@ -176,7 +191,30 @@ pub const World = struct {
         try self.addBrush(brush);
     }
     
+    pub fn addSlope(self: *World, center: Vec3, size: Vec3, angle_degrees: f32) !void {
+        const brush = try self.factory.createSlope(center, size, angle_degrees);
+        try self.addBrush(brush);
+    }
+    
+    fn ensureBVH(self: *World) !void {
+        if (self.bvh == null and self.brushes.items.len > 0) {
+            self.bvh = try BVH(Brush, getBrushAABB).init(self.factory.allocator, self.brushes.items);
+        }
+    }
+    
     pub fn testCollision(self: *const World, aabb: AABB) bool {
+        // Use BVH for large worlds, brute force for small ones
+        if (self.brushes.items.len > 10) {
+            // For const correctness, we can't build BVH here, so fall back to brute force
+            // In practice, BVH should be built when brushes are added
+            if (self.bvh) |*bvh| {
+                return bvh.query(aabb);
+            }
+        }
+        return self.testCollisionBruteForce(aabb);
+    }
+    
+    fn testCollisionBruteForce(self: *const World, aabb: AABB) bool {
         for (self.brushes.items) |brush| {
             if (brush.intersects(aabb)) return true;
         }

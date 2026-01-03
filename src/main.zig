@@ -73,33 +73,26 @@ const GameResources = struct {
     }
     
     fn addSlope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
+        try self.world.addSlope(center, size, angle_degrees);
+        
+        // Create mesh planes for rendering
         const angle_rad = angle_degrees * std.math.pi / 180.0;
         const half_size = Vec3.scale(size, 0.5);
         
-        var planes = try self.allocator.alloc(collision.Plane, 5);
+        var planes = try self.allocator.alloc(mesh.Plane, 5);
         defer self.allocator.free(planes);
         
-        planes[0] = collision.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
+        planes[0] = mesh.Plane{ .normal = Vec3.new(0, -1, 0), .distance = center.data[1] - half_size.data[1] };
         
         const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
         const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
-        planes[1] = collision.Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
+        planes[1] = mesh.Plane{ .normal = slope_normal, .distance = -Vec3.dot(slope_normal, slope_point) };
         
-        planes[2] = collision.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
-        planes[3] = collision.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
-        planes[4] = collision.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
+        planes[2] = mesh.Plane{ .normal = Vec3.new(-1, 0, 0), .distance = center.data[0] - half_size.data[0] };
+        planes[3] = mesh.Plane{ .normal = Vec3.new(1, 0, 0), .distance = -(center.data[0] + half_size.data[0]) };
+        planes[4] = mesh.Plane{ .normal = Vec3.new(0, 0, -1), .distance = center.data[2] - half_size.data[2] };
         
-        const brush = try self.world.factory.createFromPlanes(planes);
-        try self.world.addBrush(brush);
-        
-        // Convert to mesh planes
-        var mesh_planes = try self.allocator.alloc(mesh.Plane, planes.len);
-        defer self.allocator.free(mesh_planes);
-        for (planes, 0..) |p, i| {
-            mesh_planes[i] = mesh.Plane{ .normal = p.normal, .distance = p.distance };
-        }
-        
-        const mesh_brush = mesh.Brush.new(mesh_planes);
+        const mesh_brush = mesh.Brush.new(planes);
         try self.mesh_builder.addBrush(mesh_brush, color);
     }
     
