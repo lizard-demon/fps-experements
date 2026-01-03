@@ -92,25 +92,23 @@ const GameResources = struct {
         var planes = try self.allocator.alloc(collision.Plane, 5);
         defer self.allocator.free(planes);
         
-        // Bottom plane (y = min.y): normal (0,-1,0) pointing outward (downward)
+        // Bottom plane
         planes[0] = collision.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
         
-        // Sloped surface - normal points outward from the slope
+        // Sloped surface
         const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
         const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
         planes[1] = collision.Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
         
-        // Side walls (normals point outward)
+        // Side walls
         planes[2] = collision.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
         planes[3] = collision.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
         
-        // Back wall (normal points outward)
+        // Back wall
         planes[4] = collision.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
         
         const brush = try collision.Brush.init(self.allocator, planes);
         try self.brush_world.addBrush(brush);
-        
-        // Add visual geometry using the generic convex hull generator
         try self.add_brush_visual_generic(brush, color);
     }
     

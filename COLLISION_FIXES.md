@@ -52,19 +52,15 @@ Cleaned up and enhanced the collision system with better memory management, impr
 
 ## Performance Considerations
 
-### Ultraminimal BVH Integration
-- **NEW**: Custom cache-friendly BVH specifically designed for brush collision
-- 32-byte nodes (half cache line) for optimal memory access
-- 16-bit indices supporting 65K+ brushes with 50% memory savings
-- Linear memory layout eliminates pointer chasing
-- Stack-based traversal with early rejection
-- 2-3x faster queries compared to generic BVH implementations
+### BVH Integration (Prepared)
+- Code structure ready for BVH acceleration
+- Fallback to brute force when BVH not available
+- Interface designed for easy BVH integration when needed
 
 ### Memory Efficiency
 - Reduced allocations in hot paths
 - Better memory ownership patterns
 - Consistent cleanup procedures
-- Compact node structure: ~2x brush count memory overhead vs ~4x for typical BVH
 
 ## Code Quality Improvements
 
@@ -89,11 +85,10 @@ Cleaned up and enhanced the collision system with better memory management, impr
 
 ## Future Enhancements
 
-1. **Surface Area Heuristic**: Improve BVH splitting for better balance
-2. **SIMD Optimizations**: Vectorized AABB tests for even faster queries  
-3. **Slope Walking**: Add configurable slope angle limits
-4. **Moving Platforms**: Support for dynamic collision geometry
-5. **Debug Visualization**: Add collision shape rendering for development
-6. **Sound Integration**: Collision-based audio triggers
+1. **BVH Integration**: Implement proper BVH query interface for large worlds
+2. **Slope Walking**: Add configurable slope angle limits
+3. **Moving Platforms**: Support for dynamic collision geometry
+4. **Debug Visualization**: Add collision shape rendering for development
+5. **Sound Integration**: Collision-based audio triggers
 
-The collision system now features an ultraminimal, cache-friendly BVH that provides excellent performance with minimal memory overhead, plus robust movement mechanics and collision response.
+The collision system is now more robust, maintainable, and provides better gameplay feel with proper wall sliding, step-up mechanics, and collision response.
