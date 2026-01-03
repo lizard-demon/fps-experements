@@ -5,26 +5,22 @@ const sg = sokol.gfx;
 const saudio = sokol.audio;
 const simgui = sokol.imgui;
 const ig = @import("cimgui");
+
 const math = @import("lib/math.zig");
 const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
 const collision = @import("lib/collision.zig");
+const physics = @import("lib/physics.zig");
+const mesh = @import("lib/mesh.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
-const AABB = collision.AABB;
-const BrushWorld = collision.BrushWorld;
-const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
 
 // Components
-const Transform = struct { pos: Vec3 = Vec3.zero() };
-const Physics = struct { vel: Vec3 = Vec3.zero(), on_ground: bool = false };
-const Input = struct { 
-    yaw: f32 = 0, pitch: f32 = 0, mdx: f32 = 0, mdy: f32 = 0,
-    keys: packed struct { w: bool = false, a: bool = false, s: bool = false, d: bool = false, sp: bool = false } = .{}, 
-    lock: bool = false 
-};
-const Audio = struct { timer: f32 = 0, active: bool = false };
+const Transform = physics.Transform;
+const Physics = physics.Physics;
+const Input = physics.Input;
+const Audio = physics.Audio;
 
 // Archetype
 const Player = struct { transform: Transform, physics: Physics, input: Input, audio: Audio };
@@ -44,18 +40,14 @@ const GameResources = struct {
     pass_action: sg.PassAction = undefined,
     vertex_count: u32 = 0,
     
-    // Collision
-    brush_world: BrushWorld = undefined,
-    
-    // Geometry
-    vertices: std.ArrayListUnmanaged(Vertex) = .{},
-    indices: std.ArrayListUnmanaged(u16) = .{},
+    // World
+    brush_world: collision.BrushWorld = undefined,
+    mesh_builder: mesh.MeshBuilder = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.brush_world = BrushWorld.init(allocator);
-        self.vertices = .{};
-        self.indices = .{};
+        self.brush_world = collision.BrushWorld.init(allocator);
+        self.mesh_builder = mesh.MeshBuilder.init(allocator);
         
         // Init rendering
         var layout = sg.VertexLayoutState{};
@@ -72,259 +64,46 @@ const GameResources = struct {
     
     fn deinit(self: *@This()) void {
         self.brush_world.deinit();
-        self.vertices.deinit(self.allocator);
-        self.indices.deinit(self.allocator);
+        self.mesh_builder.deinit();
     }
     
-    fn add_box(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
-        // Add brush to collision world
-        const brush = try self.brush_world.addBoxAndReturn(pos, size);
-        
-        // Add visual geometry using the brush bounds to ensure perfect alignment
-        try self.add_brush_visual_generic(brush, color);
+    fn addBox(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
+        try self.brush_world.addBox(pos, size);
+        try self.mesh_builder.addBox(pos, size, color);
     }
     
-    fn add_slope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
+    fn addSlope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
         const angle_rad = angle_degrees * std.math.pi / 180.0;
         const half_size = Vec3.scale(size, 0.5);
         
-        // Create planes for a sloped brush (wedge shape)
         var planes = try self.allocator.alloc(collision.Plane, 5);
         defer self.allocator.free(planes);
         
-        // Bottom plane
         planes[0] = collision.Plane.new(Vec3.new(0, -1, 0), center.data[1] - half_size.data[1]);
         
-        // Sloped surface
         const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
         const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
         planes[1] = collision.Plane.new(slope_normal, -Vec3.dot(slope_normal, slope_point));
         
-        // Side walls
         planes[2] = collision.Plane.new(Vec3.new(-1, 0, 0), center.data[0] - half_size.data[0]);
         planes[3] = collision.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
-        
-        // Back wall
         planes[4] = collision.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
         
         const brush = try collision.Brush.init(self.allocator, planes);
         try self.brush_world.addBrush(brush);
-        try self.add_brush_visual_generic(brush, color);
+        try self.mesh_builder.addBrush(brush, color);
     }
-    
-    // Generic convex hull mesh generator for any brush
-    fn add_brush_visual_generic(self: *@This(), brush: collision.Brush, color: [4]f32) !void {
-        // For now, fall back to a simpler approach that works reliably
-        // Generate faces directly from brush planes using bounds intersection
-        
-        for (brush.planes) |plane| {
-            try self.addBrushPlaneFace(brush, plane, color);
-        }
-    }
-    
-    // Generate a face for a specific plane of the brush
-    fn addBrushPlaneFace(self: *@This(), brush: collision.Brush, plane: collision.Plane, color: [4]f32) !void {
-        // Find the intersection of this plane with the brush bounds to create a face
-        var face_vertices = std.ArrayListUnmanaged(Vec3){};
-        defer face_vertices.deinit(self.allocator);
-        
-        // For all planes, use edge intersection method to ensure proper clipping
-        try self.generateClippedFace(brush, plane, &face_vertices);
-        
-        if (face_vertices.items.len < 3) return;
-        
-        // Ensure correct winding order based on plane normal
-        self.ensureCorrectWinding(face_vertices.items, plane.normal);
-        
-        // Add vertices to mesh
-        const base = @as(u16, @intCast(self.vertices.items.len));
-        const center = self.calculateCenter(face_vertices.items);
-        
-        for (face_vertices.items) |vertex| {
-            var c = color;
-            // Simple lighting based on Y coordinate
-            if (vertex.data[1] <= center.data[1]) { 
-                c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; 
-            } else { 
-                c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; 
-            }
-            try self.vertices.append(self.allocator, .{ 
-                .pos = .{ vertex.data[0], vertex.data[1], vertex.data[2] }, 
-                .col = c 
-            });
-        }
-        
-        // Triangulate the face (fan triangulation from first vertex)
-        for (1..face_vertices.items.len - 1) |i| {
-            try self.indices.append(self.allocator, base);
-            try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
-            try self.indices.append(self.allocator, base + @as(u16, @intCast(i + 1)));
-        }
-    }
-    
-    // Generate a properly clipped face for any plane
-    fn generateClippedFace(self: *@This(), brush: collision.Brush, target_plane: collision.Plane, face_vertices: *std.ArrayListUnmanaged(Vec3)) !void {
-        // Start with a large polygon on the target plane, then clip it against all other planes
-        
-        // Create initial large quad on the target plane
-        var polygon = std.ArrayListUnmanaged(Vec3){};
-        defer polygon.deinit(self.allocator);
-        
-        // Find a reasonable size for the initial polygon based on brush bounds
-        const bounds_size = Vec3.sub(brush.bounds.max, brush.bounds.min);
-        const max_size = @max(@max(bounds_size.data[0], bounds_size.data[1]), bounds_size.data[2]) * 2;
-        
-        // Create a local coordinate system for the plane
-        var tangent = Vec3.new(1, 0, 0);
-        if (@abs(Vec3.dot(target_plane.normal, tangent)) > 0.9) {
-            tangent = Vec3.new(0, 1, 0);
-        }
-        tangent = Vec3.normalize(Vec3.sub(tangent, Vec3.scale(target_plane.normal, Vec3.dot(tangent, target_plane.normal))));
-        const bitangent = Vec3.cross(target_plane.normal, tangent);
-        
-        // Find a point on the plane (use brush center projected onto plane)
-        const brush_center = Vec3.scale(Vec3.add(brush.bounds.min, brush.bounds.max), 0.5);
-        const plane_point = Vec3.sub(brush_center, Vec3.scale(target_plane.normal, target_plane.distanceToPoint(brush_center)));
-        
-        // Create initial large quad
-        const half_size = max_size * 0.5;
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, -half_size)), Vec3.scale(bitangent, -half_size)));
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, half_size)), Vec3.scale(bitangent, -half_size)));
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, half_size)), Vec3.scale(bitangent, half_size)));
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, -half_size)), Vec3.scale(bitangent, half_size)));
-        
-        // Clip against all other planes
-        for (brush.planes) |clip_plane| {
-            // Skip the target plane itself
-            if (Vec3.dot(clip_plane.normal, target_plane.normal) > 0.999 and 
-                @abs(clip_plane.distance - target_plane.distance) < 0.001) continue;
-            
-            try self.clipPolygonByPlane(&polygon, clip_plane);
-            if (polygon.items.len == 0) break; // Polygon completely clipped away
-        }
-        
-        // Copy result to face_vertices
-        for (polygon.items) |vertex| {
-            try face_vertices.append(self.allocator, vertex);
-        }
-    }
-    
-    // Clip a polygon by a plane using Sutherland-Hodgman algorithm
-    fn clipPolygonByPlane(self: *@This(), polygon: *std.ArrayListUnmanaged(Vec3), plane: collision.Plane) !void {
-        if (polygon.items.len == 0) return;
-        
-        var output = std.ArrayListUnmanaged(Vec3){};
-        defer {
-            // Replace polygon contents with output
-            polygon.deinit(self.allocator);
-            polygon.* = output;
-        }
-        
-        if (polygon.items.len == 0) return;
-        
-        var prev_vertex = polygon.items[polygon.items.len - 1];
-        var prev_inside = plane.distanceToPoint(prev_vertex) <= collision.COLLISION_EPSILON;
-        
-        for (polygon.items) |curr_vertex| {
-            const curr_inside = plane.distanceToPoint(curr_vertex) <= collision.COLLISION_EPSILON;
-            
-            if (curr_inside) {
-                if (!prev_inside) {
-                    // Entering: add intersection point
-                    if (self.intersectLineWithPlaneUnbounded(prev_vertex, curr_vertex, plane)) |intersection| {
-                        try output.append(self.allocator, intersection);
-                    }
-                }
-                // Add current vertex
-                try output.append(self.allocator, curr_vertex);
-            } else if (prev_inside) {
-                // Exiting: add intersection point
-                if (self.intersectLineWithPlaneUnbounded(prev_vertex, curr_vertex, plane)) |intersection| {
-                    try output.append(self.allocator, intersection);
-                }
-            }
-            
-            prev_vertex = curr_vertex;
-            prev_inside = curr_inside;
-        }
-    }
-    
-    // Intersect an unbounded line with a plane
-    fn intersectLineWithPlaneUnbounded(self: *@This(), start: Vec3, end: Vec3, plane: collision.Plane) ?Vec3 {
-        _ = self;
-        const dir = Vec3.sub(end, start);
-        const denom = Vec3.dot(plane.normal, dir);
-        
-        if (@abs(denom) < collision.COLLISION_EPSILON) return null; // Line is parallel to plane
-        
-        const t = -(plane.distanceToPoint(start)) / denom;
-        return Vec3.add(start, Vec3.scale(dir, t));
-    }
-    
-    // Ensure vertices are wound correctly for the given normal
-    fn ensureCorrectWinding(self: *@This(), vertices: []Vec3, normal: Vec3) void {
-        if (vertices.len < 3) return;
-        
-        // Calculate the center
-        const center = self.calculateCenter(vertices);
-        
-        // Sort vertices counter-clockwise around the normal
-        self.sortVerticesCounterClockwise(vertices, normal, center);
-    }
-    
-    // Calculate center of vertices
-    fn calculateCenter(self: *@This(), vertices: []Vec3) Vec3 {
-        _ = self;
-        var center = Vec3.zero();
-        for (vertices) |vertex| {
-            center = Vec3.add(center, vertex);
-        }
-        return Vec3.scale(center, 1.0 / @as(f32, @floatFromInt(vertices.len)));
-    }
-    
-    // Sort vertices counter-clockwise around a plane normal
-    fn sortVerticesCounterClockwise(self: *@This(), vertices: []Vec3, normal: Vec3, center: Vec3) void {
-        _ = self;
-        // Create a local coordinate system for the plane
-        var tangent = Vec3.new(1, 0, 0);
-        if (@abs(Vec3.dot(normal, tangent)) > 0.9) {
-            tangent = Vec3.new(0, 1, 0);
-        }
-        tangent = Vec3.normalize(Vec3.sub(tangent, Vec3.scale(normal, Vec3.dot(tangent, normal))));
-        const bitangent = Vec3.cross(normal, tangent);
-        
-        // Sort by angle around the center
-        const Context = struct {
-            center: Vec3,
-            tangent: Vec3,
-            bitangent: Vec3,
-            
-            fn lessThan(ctx: @This(), a: Vec3, b: Vec3) bool {
-                const va = Vec3.sub(a, ctx.center);
-                const vb = Vec3.sub(b, ctx.center);
-                
-                const angle_a = std.math.atan2(Vec3.dot(va, ctx.bitangent), Vec3.dot(va, ctx.tangent));
-                const angle_b = std.math.atan2(Vec3.dot(vb, ctx.bitangent), Vec3.dot(vb, ctx.tangent));
-                
-                return angle_a < angle_b;
-            }
-        };
-        
-        const context = Context{ .center = center, .tangent = tangent, .bitangent = bitangent };
-        std.mem.sort(Vec3, vertices, context, Context.lessThan);
-    }
-    
     
     fn build(self: *@This()) !void {
         try self.brush_world.build();
         
         if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
         if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
-        if (self.vertices.items.len > 0) {
-            self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.vertices.items.ptr, .size = self.vertices.items.len * @sizeOf(Vertex) } });
-            self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.indices.items.ptr, .size = self.indices.items.len * @sizeOf(u16) } });
+        if (self.mesh_builder.vertices.items.len > 0) {
+            self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.mesh_builder.vertices.items.ptr, .size = self.mesh_builder.vertices.items.len * @sizeOf(mesh.Vertex) } });
+            self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.mesh_builder.indices.items.ptr, .size = self.mesh_builder.indices.items.len * @sizeOf(u16) } });
         }
-        self.vertex_count = @intCast(self.indices.items.len);
+        self.vertex_count = @intCast(self.mesh_builder.indices.items.len);
     }
     
     fn render(self: *const @This(), view: Mat4) void {
@@ -347,85 +126,8 @@ fn sys_input(inputs: []Input, resources: *GameResources) void {
     }
 }
 
-fn sys_physics(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, resources: *GameResources) void {
-    const dt = resources.delta_time;
-    const size = Vec3.new(0.98, 1.8, 0.98);
-    const player_aabb = AABB.fromCenterSize(Vec3.zero(), size);
-    
-    for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
-        const fwd: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
-        const side: f32 = if (i.keys.d) 1 else if (i.keys.a) -1 else 0;
-        const jump = i.keys.sp;
-        
-        // Apply gravity
-        p.vel.data[1] -= 12.0 * dt;
-        
-        // Jump if on ground
-        if (jump and p.on_ground) { 
-            p.vel.data[1] = 4.0; 
-            a.timer = 0.15; 
-            a.active = true; 
-        }
-        
-        // Calculate desired movement direction
-        var dir = Vec3.zero();
-        if (side != 0) dir = Vec3.add(dir, Vec3.scale(Vec3.new(@cos(i.yaw), 0, @sin(i.yaw)), side));
-        if (fwd != 0) dir = Vec3.add(dir, Vec3.scale(Vec3.new(@sin(i.yaw), 0, -@cos(i.yaw)), fwd));
-        
-        // Apply movement acceleration
-        const len = @sqrt(dir.data[0] * dir.data[0] + dir.data[2] * dir.data[2]);
-        if (len > 0.001) {
-            const wish = Vec3.scale(dir, 1.0 / len);
-            const speed = if (p.on_ground) 4.0 * len else @min(4.0 * len, 0.7);
-            const current = Vec3.dot(Vec3.new(p.vel.data[0], 0, p.vel.data[2]), wish);
-            const add = @max(0, speed - current);
-            if (add > 0) {
-                const accel = @min(70.0 * dt, add);
-                p.vel.data[0] += wish.data[0] * accel;
-                p.vel.data[2] += wish.data[2] * accel;
-            }
-        }
-        
-        // Apply friction when on ground
-        if (p.on_ground) {
-            const speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
-            if (speed > 0.1) {
-                const friction_factor: f32 = 5.0;
-                const factor = @max(0, speed - @max(speed, 0.1) * friction_factor * dt) / speed;
-                p.vel.data[0] *= factor; 
-                p.vel.data[2] *= factor;
-            } else { 
-                p.vel.data[0] = 0; 
-                p.vel.data[2] = 0; 
-            }
-        }
-        
-        // Movement with improved collision response
-        const delta = Vec3.scale(p.vel, dt);
-        const move_result = resources.brush_world.movePlayer(t.pos, delta, player_aabb);
-        
-        // Apply velocity adjustments from collision system
-        p.vel = Vec3.add(p.vel, Vec3.scale(move_result.velocity_adjustment, 1.0 / dt));
-        
-        // Update ground state and handle ceiling hits
-        p.on_ground = move_result.on_ground;
-        if (move_result.hit_ceiling) {
-            p.vel.data[1] = @min(p.vel.data[1], 0); // Stop upward movement when hitting ceiling
-        }
-        
-        // Apply some sliding friction when hitting walls
-        if (move_result.hit_wall and p.on_ground) {
-            const horizontal_speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
-            if (horizontal_speed > 0.1) {
-                const wall_friction: f32 = 2.0;
-                const factor = @max(0, horizontal_speed - horizontal_speed * wall_friction * dt) / horizontal_speed;
-                p.vel.data[0] *= factor;
-                p.vel.data[2] *= factor;
-            }
-        }
-        
-        t.pos = move_result.position;
-    }
+fn sys_physics(transforms: []Transform, physics_comps: []Physics, inputs: []Input, audios: []Audio, resources: *GameResources) void {
+    physics.update(transforms, physics_comps, inputs, audios, &resources.brush_world, resources.delta_time);
 }
 
 fn sys_render(transforms: []Transform, inputs: []Input, resources: *GameResources) void {
@@ -452,28 +154,22 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // Clean test world with just essentials
+    // Build world
+    store.resources.addBox(Vec3.new(0, -1, 0), Vec3.new(40, 2, 40), .{ 0.3, 0.3, 0.35, 1 }) catch {};
+    store.resources.addBox(Vec3.new(20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {};
+    store.resources.addBox(Vec3.new(-20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {};
+    store.resources.addBox(Vec3.new(0, 5, 20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {};
+    store.resources.addBox(Vec3.new(0, 5, -20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {};
     
-    // Ground plane
-    store.resources.add_box(Vec3.new(0, -1, 0), Vec3.new(40, 2, 40), .{ 0.3, 0.3, 0.35, 1 }) catch {};
+    store.resources.addBox(Vec3.new(-10, 0.5, -10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    store.resources.addBox(Vec3.new(-10, 1.5, -6), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
+    store.resources.addBox(Vec3.new(-10, 2.5, -2), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {};
     
-    // Boundary walls
-    store.resources.add_box(Vec3.new(20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Right wall
-    store.resources.add_box(Vec3.new(-20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Left wall
-    store.resources.add_box(Vec3.new(0, 5, 20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Front wall
-    store.resources.add_box(Vec3.new(0, 5, -20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch {}; // Back wall
-    
-    // Simple steps for testing step-up mechanics
-    store.resources.add_box(Vec3.new(-10, 0.5, -10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {}; // Step 1
-    store.resources.add_box(Vec3.new(-10, 1.5, -6), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {}; // Step 2
-    store.resources.add_box(Vec3.new(-10, 2.5, -2), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch {}; // Step 3
-    
-    // One test slope for slope mechanics
-    store.resources.add_slope(Vec3.new(10, 0, 0), Vec3.new(8, 6, 8), 30.0, .{ 0.2, 0.6, 0.2, 1 }) catch {};
+    store.resources.addSlope(Vec3.new(10, 0, 0), Vec3.new(8, 6, 8), 30.0, .{ 0.2, 0.6, 0.2, 1 }) catch {};
     
     store.resources.build() catch {};
     
-    // Player - spawn in the center of the simplified world
+    // Create player
     store.resources.player_entity = store.create(Player, allocator, .{
         .transform = .{ .pos = Vec3.new(0, 2, 0) },
         .physics = .{}, .input = .{}, .audio = .{},
