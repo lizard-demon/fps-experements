@@ -3,7 +3,7 @@ const math = @import("math.zig");
 const collision = @import("collision.zig");
 
 const Vec3 = math.Vec3;
-const AABB = collision.AABB;
+const AABB = math.AABB;
 const BrushWorld = collision.BrushWorld;
 
 // Component and input types

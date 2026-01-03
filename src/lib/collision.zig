@@ -2,6 +2,7 @@
 const std = @import("std");
 const math = @import("math.zig");
 const Vec3 = math.Vec3;
+const AABB = math.AABB;
 
 pub const COLLISION_EPSILON: f32 = 0.001;
 pub const STEP_HEIGHT: f32 = 0.25;
@@ -17,35 +18,6 @@ pub const Plane = struct {
     
     pub fn distanceToPoint(self: Plane, point: Vec3) f32 {
         return Vec3.dot(self.normal, point) + self.distance;
-    }
-};
-
-pub const AABB = struct {
-    min: Vec3,
-    max: Vec3,
-    
-    pub fn new(min: Vec3, max: Vec3) AABB {
-        return .{ .min = min, .max = max };
-    }
-    
-    pub fn fromCenterSize(center: Vec3, size: Vec3) AABB {
-        const half = Vec3.scale(size, 0.5);
-        return .{ .min = Vec3.sub(center, half), .max = Vec3.add(center, half) };
-    }
-    
-    pub fn intersects(self: AABB, other: AABB) bool {
-        return (self.min.data[0] <= other.max.data[0] and self.max.data[0] >= other.min.data[0] and
-                self.min.data[1] <= other.max.data[1] and self.max.data[1] >= other.min.data[1] and
-                self.min.data[2] <= other.max.data[2] and self.max.data[2] >= other.min.data[2]);
-    }
-    
-    pub fn union_with(self: AABB, other: AABB) AABB {
-        return .{ .min = Vec3.min(self.min, other.min), .max = Vec3.max(self.max, other.max) };
-    }
-    
-    pub fn surface_area(self: AABB) f32 {
-        const d = Vec3.sub(self.max, self.min);
-        return 2.0 * (d.data[0] * d.data[1] + d.data[1] * d.data[2] + d.data[2] * d.data[0]);
     }
 };
 

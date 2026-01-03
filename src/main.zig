@@ -91,7 +91,16 @@ const GameResources = struct {
         
         const brush = try collision.Brush.init(self.allocator, planes);
         try self.brush_world.addBrush(brush);
-        try self.mesh_builder.addBrush(brush, color);
+        
+        // Convert to mesh planes
+        var mesh_planes = try self.allocator.alloc(mesh.Plane, planes.len);
+        defer self.allocator.free(mesh_planes);
+        for (planes, 0..) |p, i| {
+            mesh_planes[i] = mesh.Plane{ .normal = p.normal, .distance = p.distance };
+        }
+        
+        const mesh_brush = mesh.Brush.new(mesh_planes);
+        try self.mesh_builder.addBrush(mesh_brush, color);
     }
     
     fn build(self: *@This()) !void {

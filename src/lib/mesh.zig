@@ -1,12 +1,26 @@
 const std = @import("std");
 const math = @import("math.zig");
-const collision = @import("collision.zig");
 
 const Vec3 = math.Vec3;
-const AABB = collision.AABB;
-const Brush = collision.Brush;
 
 pub const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
+
+pub const Plane = struct {
+    normal: Vec3,
+    distance: f32,
+    
+    pub fn distanceToPoint(self: Plane, point: Vec3) f32 {
+        return Vec3.dot(self.normal, point) + self.distance;
+    }
+};
+
+pub const Brush = struct {
+    planes: []const Plane,
+    
+    pub fn new(planes: []const Plane) Brush {
+        return .{ .planes = planes };
+    }
+};
 
 pub const MeshBuilder = struct {
     vertices: std.ArrayListUnmanaged(Vertex) = .{},
@@ -29,7 +43,7 @@ pub const MeshBuilder = struct {
         
         const base = @as(u16, @intCast(self.vertices.items.len));
         
-        // Box vertices
+        // 8 box vertices
         const verts = [_]Vec3{
             Vec3.new(min.data[0], min.data[1], min.data[2]), // 0
             Vec3.new(max.data[0], min.data[1], min.data[2]), // 1
@@ -48,20 +62,14 @@ pub const MeshBuilder = struct {
             });
         }
         
-        // Box faces (12 triangles)
+        // 12 triangles (6 faces * 2 triangles each)
         const faces = [_][3]u16{
-            // Front
-            .{ 0, 1, 2 }, .{ 0, 2, 3 },
-            // Back
-            .{ 5, 4, 7 }, .{ 5, 7, 6 },
-            // Left
-            .{ 4, 0, 3 }, .{ 4, 3, 7 },
-            // Right
-            .{ 1, 5, 6 }, .{ 1, 6, 2 },
-            // Bottom
-            .{ 4, 5, 1 }, .{ 4, 1, 0 },
-            // Top
-            .{ 3, 2, 6 }, .{ 3, 6, 7 },
+            .{ 0, 1, 2 }, .{ 0, 2, 3 }, // Front
+            .{ 5, 4, 7 }, .{ 5, 7, 6 }, // Back
+            .{ 4, 0, 3 }, .{ 4, 3, 7 }, // Left
+            .{ 1, 5, 6 }, .{ 1, 6, 2 }, // Right
+            .{ 4, 5, 1 }, .{ 4, 1, 0 }, // Bottom
+            .{ 3, 2, 6 }, .{ 3, 6, 7 }, // Top
         };
         
         for (faces) |face| {
@@ -72,83 +80,68 @@ pub const MeshBuilder = struct {
     }
     
     pub fn addBrush(self: *MeshBuilder, brush: Brush, color: [4]f32) !void {
-        // For each plane, generate a face
+        // Generate mesh for each plane face
         for (brush.planes) |plane| {
-            try self.addBrushPlaneFace(brush, plane, color);
+            try self.addBrushFace(brush, plane, color);
         }
     }
     
-    fn addBrushPlaneFace(self: *MeshBuilder, brush: Brush, plane: collision.Plane, color: [4]f32) !void {
-        var face_vertices = std.ArrayListUnmanaged(Vec3){};
-        defer face_vertices.deinit(self.allocator);
+    fn addBrushFace(self: *MeshBuilder, brush: Brush, target_plane: Plane, color: [4]f32) !void {
+        // Start with a large quad on the plane, then clip it against all other planes
+        var face_verts = std.ArrayListUnmanaged(Vec3){};
+        defer face_verts.deinit(self.allocator);
         
-        try self.generateClippedFace(brush, plane, &face_vertices);
+        // Create initial large quad on the target plane
+        const size: f32 = 100; // Large enough for any reasonable brush
         
-        if (face_vertices.items.len < 3) return;
+        // Find two perpendicular vectors to the plane normal
+        var u = Vec3.new(1, 0, 0);
+        if (@abs(Vec3.dot(target_plane.normal, u)) > 0.9) {
+            u = Vec3.new(0, 1, 0);
+        }
+        u = Vec3.normalize(Vec3.sub(u, Vec3.scale(target_plane.normal, Vec3.dot(u, target_plane.normal))));
+        const v = Vec3.cross(target_plane.normal, u);
         
-        self.ensureCorrectWinding(face_vertices.items, plane.normal);
+        // Point on the plane
+        const plane_point = Vec3.scale(target_plane.normal, -target_plane.distance);
         
+        // Create initial quad
+        try face_verts.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(u, -size)), Vec3.scale(v, -size)));
+        try face_verts.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(u, size)), Vec3.scale(v, -size)));
+        try face_verts.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(u, size)), Vec3.scale(v, size)));
+        try face_verts.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(u, -size)), Vec3.scale(v, size)));
+        
+        // Clip against all other planes
+        for (brush.planes) |clip_plane| {
+            // Skip the target plane itself
+            if (Vec3.dot(clip_plane.normal, target_plane.normal) > 0.999 and 
+                @abs(clip_plane.distance - target_plane.distance) < 0.001) continue;
+            
+            try self.clipPolygon(&face_verts, clip_plane);
+            if (face_verts.items.len == 0) break;
+        }
+        
+        if (face_verts.items.len < 3) return;
+        
+        // Add vertices and triangulate
         const base = @as(u16, @intCast(self.vertices.items.len));
-        const center = self.calculateCenter(face_vertices.items);
         
-        for (face_vertices.items) |vertex| {
-            var c = color;
-            if (vertex.data[1] <= center.data[1]) { 
-                c[0] *= 0.7; c[1] *= 0.7; c[2] *= 0.7; 
-            } else { 
-                c[0] *= 1.1; c[1] *= 1.1; c[2] *= 1.1; 
-            }
-            try self.vertices.append(self.allocator, .{ 
-                .pos = .{ vertex.data[0], vertex.data[1], vertex.data[2] }, 
-                .col = c 
+        for (face_verts.items) |vert| {
+            try self.vertices.append(self.allocator, .{
+                .pos = .{ vert.data[0], vert.data[1], vert.data[2] },
+                .col = color,
             });
         }
         
-        // Triangulate
-        for (1..face_vertices.items.len - 1) |i| {
+        // Simple fan triangulation
+        for (1..face_verts.items.len - 1) |i| {
             try self.indices.append(self.allocator, base);
             try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
             try self.indices.append(self.allocator, base + @as(u16, @intCast(i + 1)));
         }
     }
     
-    fn generateClippedFace(self: *MeshBuilder, brush: Brush, target_plane: collision.Plane, face_vertices: *std.ArrayListUnmanaged(Vec3)) !void {
-        var polygon = std.ArrayListUnmanaged(Vec3){};
-        defer polygon.deinit(self.allocator);
-        
-        const bounds_size = Vec3.sub(brush.bounds.max, brush.bounds.min);
-        const max_size = @max(@max(bounds_size.data[0], bounds_size.data[1]), bounds_size.data[2]) * 2;
-        
-        var tangent = Vec3.new(1, 0, 0);
-        if (@abs(Vec3.dot(target_plane.normal, tangent)) > 0.9) {
-            tangent = Vec3.new(0, 1, 0);
-        }
-        tangent = Vec3.normalize(Vec3.sub(tangent, Vec3.scale(target_plane.normal, Vec3.dot(tangent, target_plane.normal))));
-        const bitangent = Vec3.cross(target_plane.normal, tangent);
-        
-        const brush_center = Vec3.scale(Vec3.add(brush.bounds.min, brush.bounds.max), 0.5);
-        const plane_point = Vec3.sub(brush_center, Vec3.scale(target_plane.normal, target_plane.distanceToPoint(brush_center)));
-        
-        const half_size = max_size * 0.5;
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, -half_size)), Vec3.scale(bitangent, -half_size)));
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, half_size)), Vec3.scale(bitangent, -half_size)));
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, half_size)), Vec3.scale(bitangent, half_size)));
-        try polygon.append(self.allocator, Vec3.add(Vec3.add(plane_point, Vec3.scale(tangent, -half_size)), Vec3.scale(bitangent, half_size)));
-        
-        for (brush.planes) |clip_plane| {
-            if (Vec3.dot(clip_plane.normal, target_plane.normal) > 0.999 and 
-                @abs(clip_plane.distance - target_plane.distance) < 0.001) continue;
-            
-            try self.clipPolygonByPlane(&polygon, clip_plane);
-            if (polygon.items.len == 0) break;
-        }
-        
-        for (polygon.items) |vertex| {
-            try face_vertices.append(self.allocator, vertex);
-        }
-    }
-    
-    fn clipPolygonByPlane(self: *MeshBuilder, polygon: *std.ArrayListUnmanaged(Vec3), plane: collision.Plane) !void {
+    fn clipPolygon(self: *MeshBuilder, polygon: *std.ArrayListUnmanaged(Vec3), plane: Plane) !void {
         if (polygon.items.len == 0) return;
         
         var output = std.ArrayListUnmanaged(Vec3){};
@@ -157,83 +150,40 @@ pub const MeshBuilder = struct {
             polygon.* = output;
         }
         
-        var prev_vertex = polygon.items[polygon.items.len - 1];
-        var prev_inside = plane.distanceToPoint(prev_vertex) <= collision.COLLISION_EPSILON;
+        var prev_vert = polygon.items[polygon.items.len - 1];
+        var prev_inside = plane.distanceToPoint(prev_vert) <= 0.001;
         
-        for (polygon.items) |curr_vertex| {
-            const curr_inside = plane.distanceToPoint(curr_vertex) <= collision.COLLISION_EPSILON;
+        for (polygon.items) |curr_vert| {
+            const curr_inside = plane.distanceToPoint(curr_vert) <= 0.001;
             
             if (curr_inside) {
                 if (!prev_inside) {
-                    if (self.intersectLineWithPlane(prev_vertex, curr_vertex, plane)) |intersection| {
+                    // Entering: add intersection
+                    if (self.intersectLine(prev_vert, curr_vert, plane)) |intersection| {
                         try output.append(self.allocator, intersection);
                     }
                 }
-                try output.append(self.allocator, curr_vertex);
+                try output.append(self.allocator, curr_vert);
             } else if (prev_inside) {
-                if (self.intersectLineWithPlane(prev_vertex, curr_vertex, plane)) |intersection| {
+                // Exiting: add intersection
+                if (self.intersectLine(prev_vert, curr_vert, plane)) |intersection| {
                     try output.append(self.allocator, intersection);
                 }
             }
             
-            prev_vertex = curr_vertex;
+            prev_vert = curr_vert;
             prev_inside = curr_inside;
         }
     }
     
-    fn intersectLineWithPlane(self: *MeshBuilder, start: Vec3, end: Vec3, plane: collision.Plane) ?Vec3 {
+    fn intersectLine(self: *MeshBuilder, start: Vec3, end: Vec3, plane: Plane) ?Vec3 {
         _ = self;
         const dir = Vec3.sub(end, start);
         const denom = Vec3.dot(plane.normal, dir);
         
-        if (@abs(denom) < collision.COLLISION_EPSILON) return null;
+        if (@abs(denom) < 0.001) return null;
         
         const t = -(plane.distanceToPoint(start)) / denom;
         return Vec3.add(start, Vec3.scale(dir, t));
-    }
-    
-    fn ensureCorrectWinding(self: *MeshBuilder, vertices: []Vec3, normal: Vec3) void {
-        if (vertices.len < 3) return;
-        
-        const center = self.calculateCenter(vertices);
-        self.sortVerticesCounterClockwise(vertices, normal, center);
-    }
-    
-    fn calculateCenter(self: *MeshBuilder, vertices: []Vec3) Vec3 {
-        _ = self;
-        var center = Vec3.zero();
-        for (vertices) |vertex| {
-            center = Vec3.add(center, vertex);
-        }
-        return Vec3.scale(center, 1.0 / @as(f32, @floatFromInt(vertices.len)));
-    }
-    
-    fn sortVerticesCounterClockwise(self: *MeshBuilder, vertices: []Vec3, normal: Vec3, center: Vec3) void {
-        _ = self;
-        var tangent = Vec3.new(1, 0, 0);
-        if (@abs(Vec3.dot(normal, tangent)) > 0.9) {
-            tangent = Vec3.new(0, 1, 0);
-        }
-        tangent = Vec3.normalize(Vec3.sub(tangent, Vec3.scale(normal, Vec3.dot(tangent, normal))));
-        const bitangent = Vec3.cross(normal, tangent);
-        
-        const Context = struct {
-            center: Vec3,
-            tangent: Vec3,
-            bitangent: Vec3,
-            
-            fn lessThan(ctx: @This(), a: Vec3, b: Vec3) bool {
-                const va = Vec3.sub(a, ctx.center);
-                const vb = Vec3.sub(b, ctx.center);
-                
-                const angle_a = std.math.atan2(Vec3.dot(va, ctx.bitangent), Vec3.dot(va, ctx.tangent));
-                const angle_b = std.math.atan2(Vec3.dot(vb, ctx.bitangent), Vec3.dot(vb, ctx.tangent));
-                
-                return angle_a < angle_b;
-            }
-        };
-        
-        const context = Context{ .center = center, .tangent = tangent, .bitangent = bitangent };
-        std.mem.sort(Vec3, vertices, context, Context.lessThan);
     }
 };

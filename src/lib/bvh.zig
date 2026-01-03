@@ -2,24 +2,7 @@ const std = @import("std");
 const math = @import("math.zig");
 const Vec3 = math.Vec3;
 
-pub const AABB = struct { 
-    min: Vec3, max: Vec3,
-    
-    pub fn hit(a: AABB, b: AABB) bool { 
-        return (a.min.data[0] <= b.max.data[0] and a.max.data[0] >= b.min.data[0] and
-                a.min.data[1] <= b.max.data[1] and a.max.data[1] >= b.min.data[1] and
-                a.min.data[2] <= b.max.data[2] and a.max.data[2] >= b.min.data[2]); 
-    }
-    
-    pub fn union_with(a: AABB, b: AABB) AABB {
-        return .{ .min = Vec3.min(a.min, b.min), .max = Vec3.max(a.max, b.max) };
-    }
-    
-    pub fn surface_area(self: AABB) f32 {
-        const d = Vec3.sub(self.max, self.min);
-        return 2.0 * (d.data[0] * d.data[1] + d.data[1] * d.data[2] + d.data[2] * d.data[0]);
-    }
-};
+pub const AABB = math.AABB;
 
 const Node = struct { 
     box: AABB, 
