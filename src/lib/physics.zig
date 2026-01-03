@@ -4,7 +4,7 @@ const collision = @import("collision.zig");
 
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
-const BrushWorld = collision.BrushWorld;
+const World = collision.World;
 
 // Component and input types
 pub const Transform = struct { pos: Vec3 = Vec3.zero() };
@@ -22,7 +22,7 @@ pub const Input = struct {
 
 pub const Audio = struct { timer: f32 = 0, active: bool = false };
 
-pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, world: *const BrushWorld, dt: f32) void {
+pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, world: *const World, dt: f32) void {
     const size = Vec3.new(0.98, 1.8, 0.98);
     const player_aabb = AABB.fromCenterSize(Vec3.zero(), size);
     

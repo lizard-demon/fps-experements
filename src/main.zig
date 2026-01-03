@@ -41,12 +41,12 @@ const GameResources = struct {
     vertex_count: u32 = 0,
     
     // World
-    brush_world: collision.BrushWorld = undefined,
+    world: collision.World = undefined,
     mesh_builder: mesh.MeshBuilder = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.brush_world = collision.BrushWorld.init(allocator);
+        self.world = collision.World.init(allocator);
         self.mesh_builder = mesh.MeshBuilder.init(allocator);
         
         // Init rendering
@@ -63,12 +63,12 @@ const GameResources = struct {
     }
     
     fn deinit(self: *@This()) void {
-        self.brush_world.deinit();
+        self.world.deinit();
         self.mesh_builder.deinit();
     }
     
     fn addBox(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
-        try self.brush_world.addBox(pos, size);
+        try self.world.addBox(pos, size);
         try self.mesh_builder.addBox(pos, size, color);
     }
     
@@ -89,8 +89,8 @@ const GameResources = struct {
         planes[3] = collision.Plane.new(Vec3.new(1, 0, 0), -(center.data[0] + half_size.data[0]));
         planes[4] = collision.Plane.new(Vec3.new(0, 0, -1), center.data[2] - half_size.data[2]);
         
-        const brush = try collision.Brush.init(self.allocator, planes);
-        try self.brush_world.addBrush(brush);
+        const brush = try self.world.factory.createFromPlanes(planes);
+        try self.world.addBrush(brush);
         
         // Convert to mesh planes
         var mesh_planes = try self.allocator.alloc(mesh.Plane, planes.len);
@@ -104,8 +104,6 @@ const GameResources = struct {
     }
     
     fn build(self: *@This()) !void {
-        try self.brush_world.build();
-        
         if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
         if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
         if (self.mesh_builder.vertices.items.len > 0) {
@@ -136,7 +134,7 @@ fn sys_input(inputs: []Input, resources: *GameResources) void {
 }
 
 fn sys_physics(transforms: []Transform, physics_comps: []Physics, inputs: []Input, audios: []Audio, resources: *GameResources) void {
-    physics.update(transforms, physics_comps, inputs, audios, &resources.brush_world, resources.delta_time);
+    physics.update(transforms, physics_comps, inputs, audios, &resources.world, resources.delta_time);
 }
 
 fn sys_render(transforms: []Transform, inputs: []Input, resources: *GameResources) void {
