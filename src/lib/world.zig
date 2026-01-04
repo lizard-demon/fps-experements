@@ -33,8 +33,38 @@ pub const Brush = struct {
     bounds: AABB,
     
     pub fn intersects(self: Brush, aabb: AABB) bool {
+        // Quick bounds check first
         if (!self.bounds.intersects(aabb)) return false;
         
+        // For a convex brush, we need to check if the AABB intersects the brush volume
+        // This means checking if any part of the AABB is inside ALL planes
+        
+        // Test all 8 corners of the AABB
+        const corners = [_]Vec3{
+            Vec3.new(aabb.min.data[0], aabb.min.data[1], aabb.min.data[2]),
+            Vec3.new(aabb.max.data[0], aabb.min.data[1], aabb.min.data[2]),
+            Vec3.new(aabb.min.data[0], aabb.max.data[1], aabb.min.data[2]),
+            Vec3.new(aabb.max.data[0], aabb.max.data[1], aabb.min.data[2]),
+            Vec3.new(aabb.min.data[0], aabb.min.data[1], aabb.max.data[2]),
+            Vec3.new(aabb.max.data[0], aabb.min.data[1], aabb.max.data[2]),
+            Vec3.new(aabb.min.data[0], aabb.max.data[1], aabb.max.data[2]),
+            Vec3.new(aabb.max.data[0], aabb.max.data[1], aabb.max.data[2]),
+        };
+        
+        // If any corner is inside the brush, we have intersection
+        for (corners) |corner| {
+            var inside = true;
+            for (self.planes) |plane| {
+                if (plane.distanceToPoint(corner) > EPSILON) {
+                    inside = false;
+                    break;
+                }
+            }
+            if (inside) return true;
+        }
+        
+        // Also check if the brush intersects the AABB using separating axis theorem
+        // Check each plane as a potential separating axis
         for (self.planes) |plane| {
             const center = Vec3.scale(Vec3.add(aabb.min, aabb.max), 0.5);
             const extents = Vec3.scale(Vec3.sub(aabb.max, aabb.min), 0.5);
@@ -42,8 +72,12 @@ pub const Brush = struct {
                           @abs(plane.normal.data[1] * extents.data[1]) +
                           @abs(plane.normal.data[2] * extents.data[2]);
             
-            if (plane.distanceToPoint(center) > radius + EPSILON) return false;
+            const distance = plane.distanceToPoint(center);
+            
+            // If AABB is completely outside this plane, no intersection
+            if (distance > radius + EPSILON) return false;
         }
+        
         return true;
     }
 };
