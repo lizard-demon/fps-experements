@@ -54,7 +54,7 @@ pub const Vertex = extern struct {
     col: [4]f32 
 };
 
-// Simple mesh builder for rendering
+// Optimal mesh builder for arbitrary convex brushes
 pub const MeshBuilder = struct {
     vertices: std.ArrayListUnmanaged(Vertex) = .{},
     indices: std.ArrayListUnmanaged(u16) = .{},
@@ -69,40 +69,142 @@ pub const MeshBuilder = struct {
         self.indices.deinit(self.allocator);
     }
     
-    pub fn addBox(self: *MeshBuilder, center: Vec3, size: Vec3, color: [4]f32) !void {
-        const half = Vec3.scale(size, 0.5);
-        const min = Vec3.sub(center, half);
-        const max = Vec3.add(center, half);
+    // Core algorithm: Generate mesh from arbitrary convex brush
+    pub fn addBrush(self: *MeshBuilder, brush: Brush, color: [4]f32) !void {
+        // Step 1: Find all vertices by intersecting plane triplets
+        var hull_vertices = std.ArrayListUnmanaged(Vec3){};
+        defer hull_vertices.deinit(self.allocator);
         
+        for (0..brush.planes.len) |i| {
+            for (i + 1..brush.planes.len) |j| {
+                for (j + 1..brush.planes.len) |k| {
+                    if (intersectThreePlanes(brush.planes[i], brush.planes[j], brush.planes[k])) |vertex| {
+                        if (isVertexInsideBrush(vertex, brush) and !isDuplicateVertex(hull_vertices.items, vertex)) {
+                            try hull_vertices.append(self.allocator, vertex);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (hull_vertices.items.len < 4) return;
+        
+        // Step 2: Generate convex hull using gift wrapping algorithm
+        try self.generateConvexHull(hull_vertices.items, color);
+    }
+    
+    // Gift wrapping algorithm for convex hull face generation
+    fn generateConvexHull(self: *MeshBuilder, vertices: []Vec3, color: [4]f32) !void {
         const base = @as(u16, @intCast(self.vertices.items.len));
         
-        // 8 box vertices
-        const verts = [_]Vec3{
-            Vec3.new(min.data[0], min.data[1], min.data[2]), Vec3.new(max.data[0], min.data[1], min.data[2]),
-            Vec3.new(max.data[0], max.data[1], min.data[2]), Vec3.new(min.data[0], max.data[1], min.data[2]),
-            Vec3.new(min.data[0], min.data[1], max.data[2]), Vec3.new(max.data[0], min.data[1], max.data[2]),
-            Vec3.new(max.data[0], max.data[1], max.data[2]), Vec3.new(min.data[0], max.data[1], max.data[2]),
-        };
-        
-        for (verts) |v| {
-            try self.vertices.append(self.allocator, .{ 
-                .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = color 
+        // Add vertices to mesh
+        for (vertices) |v| {
+            try self.vertices.append(self.allocator, .{
+                .pos = .{ v.data[0], v.data[1], v.data[2] },
+                .col = color
             });
         }
         
-        // 12 triangles
-        const faces = [_][3]u16{
-            .{ 0, 1, 2 }, .{ 0, 2, 3 }, .{ 5, 4, 7 }, .{ 5, 7, 6 }, .{ 4, 0, 3 }, .{ 4, 3, 7 },
-            .{ 1, 5, 6 }, .{ 1, 6, 2 }, .{ 4, 5, 1 }, .{ 4, 1, 0 }, .{ 3, 2, 6 }, .{ 3, 6, 7 },
-        };
-        
-        for (faces) |face| {
-            try self.indices.append(self.allocator, base + face[0]);
-            try self.indices.append(self.allocator, base + face[1]);
-            try self.indices.append(self.allocator, base + face[2]);
+        // For each potential face, check if it's on the convex hull
+        for (0..vertices.len) |i| {
+            for (i + 1..vertices.len) |j| {
+                for (j + 1..vertices.len) |k| {
+                    const v0 = vertices[i];
+                    const v1 = vertices[j]; 
+                    const v2 = vertices[k];
+                    
+                    // Calculate face normal
+                    const edge1 = Vec3.sub(v1, v0);
+                    const edge2 = Vec3.sub(v2, v0);
+                    const normal = Vec3.cross(edge1, edge2);
+                    
+                    if (Vec3.length(normal) < EPSILON) continue;
+                    
+                    // Check if all other vertices are on one side (convex hull property)
+                    var is_hull_face = true;
+                    var side_sign: ?f32 = null;
+                    
+                    for (vertices, 0..) |test_vertex, idx| {
+                        if (idx == i or idx == j or idx == k) continue;
+                        
+                        const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
+                        if (@abs(dot) > EPSILON) {
+                            if (side_sign == null) {
+                                side_sign = dot;
+                            } else if (side_sign.? * dot < 0) {
+                                is_hull_face = false;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (is_hull_face) {
+                        // Add triangle with correct winding (outward normal)
+                        if ((side_sign orelse 1) > 0) {
+                            try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
+                            try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
+                            try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
+                        } else {
+                            try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
+                            try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
+                            try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
+                        }
+                    }
+                }
+            }
         }
     }
 };
+
+// Helper function to intersect three planes and find their common point
+fn intersectThreePlanes(p1: Plane, p2: Plane, p3: Plane) ?Vec3 {
+    const n1 = p1.normal;
+    const n2 = p2.normal;
+    const n3 = p3.normal;
+    
+    // Calculate the determinant of the normal matrix
+    const det = Vec3.dot(n1, Vec3.cross(n2, n3));
+    
+    if (@abs(det) < EPSILON) return null; // Planes are parallel or coplanar
+    
+    // Calculate the intersection point using Cramer's rule
+    const c1 = Vec3.cross(n2, n3);
+    const c2 = Vec3.cross(n3, n1);
+    const c3 = Vec3.cross(n1, n2);
+    
+    const point = Vec3.scale(
+        Vec3.add(
+            Vec3.add(
+                Vec3.scale(c1, -p1.distance),
+                Vec3.scale(c2, -p2.distance)
+            ),
+            Vec3.scale(c3, -p3.distance)
+        ),
+        1.0 / det
+    );
+    
+    return point;
+}
+
+// Check if a vertex is inside a brush (satisfies all plane constraints)
+fn isVertexInsideBrush(vertex: Vec3, brush: Brush) bool {
+    for (brush.planes) |plane| {
+        if (plane.distanceToPoint(vertex) > EPSILON) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Check for duplicate vertices within epsilon tolerance
+fn isDuplicateVertex(vertices: []Vec3, vertex: Vec3) bool {
+    for (vertices) |existing| {
+        if (Vec3.dist(vertex, existing) < EPSILON * 10) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // World with BVH for fast collision queries
 pub const World = struct {

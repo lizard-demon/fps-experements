@@ -161,10 +161,6 @@ const GameResources = struct {
         self.mesh_builder.deinit();
     }
     
-    fn addBox(self: *@This(), center: Vec3, size: Vec3, color: [4]f32) !void {
-        try self.mesh_builder.addBox(center, size, color);
-    }
-    
     fn build(self: *@This()) !void {
         if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
         if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
@@ -224,11 +220,9 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // Build visual representation of collision brushes
+    // Build visual representation using actual brush geometry
     for (store.resources.brushes) |brush| {
-        const center = Vec3.scale(Vec3.add(brush.bounds.min, brush.bounds.max), 0.5);
-        const size = Vec3.sub(brush.bounds.max, brush.bounds.min);
-        store.resources.addBox(center, size, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
+        store.resources.mesh_builder.addBrush(brush, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
     }
     
     store.resources.build() catch |err| {
