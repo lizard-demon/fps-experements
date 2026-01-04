@@ -189,10 +189,7 @@ export fn init() void {
     
     // Build visual representation using actual brush geometry
     for (store.resources.brushes) |brush| {
-        const vertex_count_before = store.resources.mesh_builder.vertices.items.len;
         store.resources.mesh_builder.addBrush(brush, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
-        const vertex_count_after = store.resources.mesh_builder.vertices.items.len;
-        std.log.info("Brush mesh: {} vertices added (total: {})", .{ vertex_count_after - vertex_count_before, vertex_count_after });
     }
     
     store.resources.build() catch |err| {
