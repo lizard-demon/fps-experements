@@ -1,11 +1,19 @@
 const std = @import("std");
 const math = @import("math.zig");
-const collision = @import("collision.zig");
+const world = @import("world.zig");
 
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
-const World = collision.World;
+const World = world.World;
 const EPSILON = math.EPSILON;
+const STEP_HEIGHT = math.STEP_HEIGHT;
+const GROUND_SNAP = math.GROUND_SNAP;
+
+// Movement result
+pub const MoveResult = struct {
+    pos: Vec3,
+    hit: bool = false,
+};
 
 // Physics configuration - all tunable constants in one place
 pub const PhysicsConfig = struct {
@@ -41,11 +49,11 @@ pub const Audio = struct { timer: f32 = 0, active: bool = false };
 // Default physics configuration
 pub const default_config = PhysicsConfig{};
 
-pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, world: *const World, dt: f32) void {
-    updateWithConfig(transforms, physics, inputs, audios, world, dt, default_config);
+pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, collision_world: *const World, dt: f32) void {
+    updateWithConfig(transforms, physics, inputs, audios, collision_world, dt, default_config);
 }
 
-pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, world: *const World, dt: f32, config: PhysicsConfig) void {
+pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, collision_world: *const World, dt: f32, config: PhysicsConfig) void {
     const player_aabb = AABB.fromCenterSize(Vec3.zero(), config.player_size);
     
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
@@ -97,23 +105,121 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
         
         // Movement with collision
         const delta = Vec3.scale(p.vel, dt);
-        const move_result = world.movePlayer(t.pos, delta, player_aabb);
+        const move_result = movePlayer(collision_world, t.pos, delta, player_aabb);
         
-        // Apply collision response
-        p.vel = Vec3.add(p.vel, Vec3.scale(move_result.velocity_adjustment, 1.0 / dt));
-        p.on_ground = move_result.on_ground;
-        if (move_result.hit_ceiling) p.vel.data[1] = @min(p.vel.data[1], 0);
+        // Update position
+        t.pos = move_result.pos;
         
-        // Wall friction
-        if (move_result.hit_wall and p.on_ground) {
-            const horizontal_speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
-            if (horizontal_speed > 0.1) {
-                const factor = @max(0, horizontal_speed - horizontal_speed * config.wall_friction * dt) / horizontal_speed;
-                p.vel.data[0] *= factor;
-                p.vel.data[2] *= factor;
+        // Check ground state
+        p.on_ground = isOnGround(collision_world, t.pos, player_aabb);
+        
+        // Apply collision response - if we hit something, adjust velocity
+        if (move_result.hit) {
+            const actual_delta = Vec3.sub(move_result.pos, t.pos);
+            const intended_delta = delta;
+            
+            // Calculate what part of velocity was blocked
+            const blocked_delta = Vec3.sub(intended_delta, actual_delta);
+            
+            // Remove blocked velocity components
+            if (Vec3.length(blocked_delta) > EPSILON) {
+                // If we moved less than intended, we hit something
+                
+                // Remove velocity in the direction we couldn't move
+                if (@abs(blocked_delta.data[1]) > EPSILON) {
+                    // Vertical collision - stop vertical movement
+                    if (blocked_delta.data[1] > 0) {
+                        p.vel.data[1] = @min(p.vel.data[1], 0); // Hit ceiling
+                    } else {
+                        p.vel.data[1] = @max(p.vel.data[1], 0); // Hit ground
+                    }
+                }
+                
+                // Horizontal collision - apply wall friction
+                const horizontal_blocked = @sqrt(blocked_delta.data[0] * blocked_delta.data[0] + blocked_delta.data[2] * blocked_delta.data[2]);
+                if (horizontal_blocked > EPSILON and p.on_ground) {
+                    const horizontal_speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
+                    if (horizontal_speed > 0.1) {
+                        const factor = @max(0, horizontal_speed - horizontal_speed * config.wall_friction * dt) / horizontal_speed;
+                        p.vel.data[0] *= factor;
+                        p.vel.data[2] *= factor;
+                    }
+                }
             }
         }
-        
-        t.pos = move_result.position;
     }
+}
+
+// Pike-style movement system - belongs in physics, not world
+pub fn movePlayer(collision_world: *const World, start: Vec3, delta: Vec3, player_aabb: AABB) MoveResult {
+    if (Vec3.length(delta) < EPSILON) return .{ .pos = start };
+    
+    return tryDirect(collision_world, start, delta, player_aabb) orelse 
+           tryStep(collision_world, start, delta, player_aabb) orelse 
+           trySlide(collision_world, start, delta, player_aabb) orelse 
+           .{ .pos = start, .hit = true };
+}
+
+// Try direct movement
+fn tryDirect(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
+    const target = Vec3.add(pos, delta);
+    const test_aabb = AABB{ .min = Vec3.add(target, aabb.min), .max = Vec3.add(target, aabb.max) };
+    return if (!collision_world.testCollision(test_aabb)) .{ .pos = target } else null;
+}
+
+// Try step-up
+fn tryStep(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
+    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
+    if (Vec3.length(horizontal) < EPSILON) return null;
+    
+    const step_pos = Vec3.add(Vec3.add(pos, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
+    const step_aabb = AABB{ .min = Vec3.add(step_pos, aabb.min), .max = Vec3.add(step_pos, aabb.max) };
+    
+    if (!collision_world.testCollision(step_aabb)) {
+        const ground_pos = findGround(collision_world, step_pos, aabb);
+        const final_pos = Vec3.new(ground_pos.data[0], ground_pos.data[1] + delta.data[1], ground_pos.data[2]);
+        const final_aabb = AABB{ .min = Vec3.add(final_pos, aabb.min), .max = Vec3.add(final_pos, aabb.max) };
+        return if (!collision_world.testCollision(final_aabb)) .{ .pos = final_pos } else .{ .pos = ground_pos };
+    }
+    return null;
+}
+
+// Try wall sliding
+fn trySlide(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
+    var result = pos;
+    var moved = false;
+    
+    inline for ([_]usize{ 0, 1, 2 }) |axis| {
+        if (@abs(delta.data[axis]) > EPSILON) {
+            var test_pos = result;
+            test_pos.data[axis] += delta.data[axis];
+            const test_aabb = AABB{ .min = Vec3.add(test_pos, aabb.min), .max = Vec3.add(test_pos, aabb.max) };
+            if (!collision_world.testCollision(test_aabb)) {
+                result.data[axis] = test_pos.data[axis];
+                moved = true;
+            }
+        }
+    }
+    
+    return if (moved) .{ .pos = result } else null;
+}
+
+fn findGround(collision_world: *const World, start: Vec3, aabb: AABB) Vec3 {
+    var step_down: f32 = GROUND_SNAP;
+    while (step_down <= STEP_HEIGHT + GROUND_SNAP) {
+        const test_pos = Vec3.new(start.data[0], start.data[1] - step_down, start.data[2]);
+        const test_aabb = AABB{ .min = Vec3.add(test_pos, aabb.min), .max = Vec3.add(test_pos, aabb.max) };
+        
+        if (collision_world.testCollision(test_aabb)) {
+            return Vec3.new(start.data[0], start.data[1] - (step_down - GROUND_SNAP), start.data[2]);
+        }
+        step_down += GROUND_SNAP;
+    }
+    return start;
+}
+
+pub fn isOnGround(collision_world: *const World, position: Vec3, aabb: AABB) bool {
+    const ground_test = Vec3.new(position.data[0], position.data[1] - GROUND_SNAP, position.data[2]);
+    const ground_aabb = AABB{ .min = Vec3.add(ground_test, aabb.min), .max = Vec3.add(ground_test, aabb.max) };
+    return collision_world.testCollision(ground_aabb);
 }

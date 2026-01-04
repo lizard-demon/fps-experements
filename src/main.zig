@@ -9,12 +9,12 @@ const ig = @import("cimgui");
 const math = @import("lib/math.zig");
 const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
-const collision = @import("lib/collision.zig");
+const world = @import("lib/world.zig");
 const physics = @import("lib/physics.zig");
-const mesh = @import("lib/mesh.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
+const AABB = math.AABB;
 
 // Components
 const Transform = physics.Transform;
@@ -40,14 +40,108 @@ const GameResources = struct {
     pass_action: sg.PassAction = undefined,
     vertex_count: u32 = 0,
     
-    // World
-    world: collision.World = undefined,
-    mesh_builder: mesh.MeshBuilder = undefined,
+    // World - now just holds brush data
+    world: world.World = undefined,
+    mesh_builder: world.MeshBuilder = undefined,
+    
+    // Static brush storage - ultra minimal!
+    brush_planes: [9 * 6]world.Plane = undefined, // 9 brushes, max 6 planes each
+    brushes: [9]world.Brush = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.world = collision.World.init(allocator);
-        self.mesh_builder = mesh.MeshBuilder.init(allocator);
+        self.mesh_builder = world.MeshBuilder.init(allocator);
+        
+        // Create brushes with direct plane data - ultra minimal!
+        
+        // Ground box: -20,-1,-20 to 20,1,20
+        self.brush_planes[0] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -20 };  // Right
+        self.brush_planes[1] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -20 };  // Left
+        self.brush_planes[2] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -1 };   // Top
+        self.brush_planes[3] = .{ .normal = Vec3.new( 0, -1,  0), .distance = -1 };   // Bottom
+        self.brush_planes[4] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -20 };  // Front
+        self.brush_planes[5] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -20 };  // Back
+        self.brushes[0] = .{ .planes = self.brush_planes[0..6], .bounds = AABB.new(Vec3.new(-20, -1, -20), Vec3.new(20, 1, 20)) };
+        
+        // Right wall: 19,0,-20 to 21,10,20
+        self.brush_planes[6] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -21 };
+        self.brush_planes[7] = .{ .normal = Vec3.new(-1,  0,  0), .distance = 19 };
+        self.brush_planes[8] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -10 };
+        self.brush_planes[9] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 0 };
+        self.brush_planes[10] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -20 };
+        self.brush_planes[11] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -20 };
+        self.brushes[1] = .{ .planes = self.brush_planes[6..12], .bounds = AABB.new(Vec3.new(19, 0, -20), Vec3.new(21, 10, 20)) };
+        
+        // Left wall: -21,0,-20 to -19,10,20
+        self.brush_planes[12] = .{ .normal = Vec3.new( 1,  0,  0), .distance = 19 };
+        self.brush_planes[13] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -21 };
+        self.brush_planes[14] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -10 };
+        self.brush_planes[15] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 0 };
+        self.brush_planes[16] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -20 };
+        self.brush_planes[17] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -20 };
+        self.brushes[2] = .{ .planes = self.brush_planes[12..18], .bounds = AABB.new(Vec3.new(-21, 0, -20), Vec3.new(-19, 10, 20)) };
+        
+        // Back wall: -20,0,19 to 20,10,21
+        self.brush_planes[18] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -20 };
+        self.brush_planes[19] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -20 };
+        self.brush_planes[20] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -10 };
+        self.brush_planes[21] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 0 };
+        self.brush_planes[22] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -21 };
+        self.brush_planes[23] = .{ .normal = Vec3.new( 0,  0, -1), .distance = 19 };
+        self.brushes[3] = .{ .planes = self.brush_planes[18..24], .bounds = AABB.new(Vec3.new(-20, 0, 19), Vec3.new(20, 10, 21)) };
+        
+        // Front wall: -20,0,-21 to 20,10,-19
+        self.brush_planes[24] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -20 };
+        self.brush_planes[25] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -20 };
+        self.brush_planes[26] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -10 };
+        self.brush_planes[27] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 0 };
+        self.brush_planes[28] = .{ .normal = Vec3.new( 0,  0,  1), .distance = 19 };
+        self.brush_planes[29] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -21 };
+        self.brushes[4] = .{ .planes = self.brush_planes[24..30], .bounds = AABB.new(Vec3.new(-20, 0, -21), Vec3.new(20, 10, -19)) };
+        
+        // Platform 1: -12,0,-12 to -8,1,-8
+        self.brush_planes[30] = .{ .normal = Vec3.new( 1,  0,  0), .distance = 8 };
+        self.brush_planes[31] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -12 };
+        self.brush_planes[32] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -1 };
+        self.brush_planes[33] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 0 };
+        self.brush_planes[34] = .{ .normal = Vec3.new( 0,  0,  1), .distance = 8 };
+        self.brush_planes[35] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -12 };
+        self.brushes[5] = .{ .planes = self.brush_planes[30..36], .bounds = AABB.new(Vec3.new(-12, 0, -12), Vec3.new(-8, 1, -8)) };
+        
+        // Platform 2: -12,1,-8 to -8,2,-4
+        self.brush_planes[36] = .{ .normal = Vec3.new( 1,  0,  0), .distance = 8 };
+        self.brush_planes[37] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -12 };
+        self.brush_planes[38] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -2 };
+        self.brush_planes[39] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 1 };
+        self.brush_planes[40] = .{ .normal = Vec3.new( 0,  0,  1), .distance = 4 };
+        self.brush_planes[41] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -8 };
+        self.brushes[6] = .{ .planes = self.brush_planes[36..42], .bounds = AABB.new(Vec3.new(-12, 1, -8), Vec3.new(-8, 2, -4)) };
+        
+        // Platform 3: -12,2,-4 to -8,3,0
+        self.brush_planes[42] = .{ .normal = Vec3.new( 1,  0,  0), .distance = 8 };
+        self.brush_planes[43] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -12 };
+        self.brush_planes[44] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -3 };
+        self.brush_planes[45] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 2 };
+        self.brush_planes[46] = .{ .normal = Vec3.new( 0,  0,  1), .distance = 0 };
+        self.brush_planes[47] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -4 };
+        self.brushes[7] = .{ .planes = self.brush_planes[42..48], .bounds = AABB.new(Vec3.new(-12, 2, -4), Vec3.new(-8, 3, 0)) };
+        
+        // Slope: center 10,0,0 size 8,6,8 angle 30 degrees
+        const angle_rad = 30.0 * std.math.pi / 180.0;
+        const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
+        self.brush_planes[48] = .{ .normal = Vec3.new(0, -1, 0), .distance = -3 };  // Bottom
+        self.brush_planes[49] = .{ .normal = slope_normal, .distance = -Vec3.dot(slope_normal, Vec3.new(10, 3, 0)) };  // Slope
+        self.brush_planes[50] = .{ .normal = Vec3.new(-1, 0, 0), .distance = 6 };   // Left
+        self.brush_planes[51] = .{ .normal = Vec3.new( 1, 0, 0), .distance = -14 }; // Right
+        self.brush_planes[52] = .{ .normal = Vec3.new( 0, 0, -1), .distance = -4 }; // Back
+        self.brushes[8] = .{ .planes = self.brush_planes[48..53], .bounds = AABB.new(Vec3.new(6, -3, -4), Vec3.new(14, 3, 4)) };
+        
+        self.world = world.World.init(&self.brushes, allocator) catch world.World{ 
+            .brushes = &self.brushes, 
+            .bvh_nodes = &[_]world.BVHNode{}, 
+            .brush_indices = &[_]u32{}, 
+            .allocator = allocator 
+        };
         
         // Init rendering
         var layout = sg.VertexLayoutState{};
@@ -67,40 +161,15 @@ const GameResources = struct {
         self.mesh_builder.deinit();
     }
     
-    fn addBox(self: *@This(), pos: Vec3, size: Vec3, color: [4]f32) !void {
-        try self.world.addBox(pos, size);
-        try self.mesh_builder.addBox(pos, size, color);
-    }
-    
-    fn addSlope(self: *@This(), center: Vec3, size: Vec3, angle_degrees: f32, color: [4]f32) !void {
-        try self.world.addSlope(center, size, angle_degrees);
-        
-        // Create mesh planes for rendering
-        const angle_rad = angle_degrees * std.math.pi / 180.0;
-        const half_size = Vec3.scale(size, 0.5);
-        
-        var planes = try self.allocator.alloc(mesh.Plane, 5);
-        defer self.allocator.free(planes);
-        
-        planes[0] = mesh.Plane{ .normal = Vec3.new(0, -1, 0), .distance = center.data[1] - half_size.data[1] };
-        
-        const slope_normal = Vec3.normalize(Vec3.new(@sin(angle_rad), @cos(angle_rad), 0));
-        const slope_point = Vec3.new(center.data[0], center.data[1] + half_size.data[1], center.data[2]);
-        planes[1] = mesh.Plane{ .normal = slope_normal, .distance = -Vec3.dot(slope_normal, slope_point) };
-        
-        planes[2] = mesh.Plane{ .normal = Vec3.new(-1, 0, 0), .distance = center.data[0] - half_size.data[0] };
-        planes[3] = mesh.Plane{ .normal = Vec3.new(1, 0, 0), .distance = -(center.data[0] + half_size.data[0]) };
-        planes[4] = mesh.Plane{ .normal = Vec3.new(0, 0, -1), .distance = center.data[2] - half_size.data[2] };
-        
-        const mesh_brush = mesh.Brush.new(planes);
-        try self.mesh_builder.addBrush(mesh_brush, color);
+    fn addBox(self: *@This(), center: Vec3, size: Vec3, color: [4]f32) !void {
+        try self.mesh_builder.addBox(center, size, color);
     }
     
     fn build(self: *@This()) !void {
         if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
         if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
         if (self.mesh_builder.vertices.items.len > 0) {
-            self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.mesh_builder.vertices.items.ptr, .size = self.mesh_builder.vertices.items.len * @sizeOf(mesh.Vertex) } });
+            self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.mesh_builder.vertices.items.ptr, .size = self.mesh_builder.vertices.items.len * @sizeOf(world.Vertex) } });
             self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.mesh_builder.indices.items.ptr, .size = self.mesh_builder.indices.items.len * @sizeOf(u16) } });
         }
         // Use saturating cast to prevent overflow
@@ -155,36 +224,12 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // Build world - handle errors gracefully
-    store.resources.addBox(Vec3.new(0, -1, 0), Vec3.new(40, 2, 40), .{ 0.3, 0.3, 0.35, 1 }) catch |err| {
-        std.log.err("Failed to add ground box: {}", .{err});
-    };
-    store.resources.addBox(Vec3.new(20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
-        std.log.err("Failed to add wall box: {}", .{err});
-    };
-    store.resources.addBox(Vec3.new(-20, 5, 0), Vec3.new(2, 10, 40), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
-        std.log.err("Failed to add wall box: {}", .{err});
-    };
-    store.resources.addBox(Vec3.new(0, 5, 20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
-        std.log.err("Failed to add wall box: {}", .{err});
-    };
-    store.resources.addBox(Vec3.new(0, 5, -20), Vec3.new(40, 10, 2), .{ 0.5, 0.4, 0.3, 1 }) catch |err| {
-        std.log.err("Failed to add wall box: {}", .{err});
-    };
-    
-    store.resources.addBox(Vec3.new(-10, 0.5, -10), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch |err| {
-        std.log.err("Failed to add platform box: {}", .{err});
-    };
-    store.resources.addBox(Vec3.new(-10, 1.5, -6), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch |err| {
-        std.log.err("Failed to add platform box: {}", .{err});
-    };
-    store.resources.addBox(Vec3.new(-10, 2.5, -2), Vec3.new(4, 1, 4), .{ 0.6, 0.2, 0.2, 1 }) catch |err| {
-        std.log.err("Failed to add platform box: {}", .{err});
-    };
-    
-    store.resources.addSlope(Vec3.new(10, 0, 0), Vec3.new(8, 6, 8), 30.0, .{ 0.2, 0.6, 0.2, 1 }) catch |err| {
-        std.log.err("Failed to add slope: {}", .{err});
-    };
+    // Build visual representation of collision brushes
+    for (store.resources.brushes) |brush| {
+        const center = Vec3.scale(Vec3.add(brush.bounds.min, brush.bounds.max), 0.5);
+        const size = Vec3.sub(brush.bounds.max, brush.bounds.min);
+        store.resources.addBox(center, size, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
+    }
     
     store.resources.build() catch |err| {
         std.log.err("Failed to build mesh: {}", .{err});
