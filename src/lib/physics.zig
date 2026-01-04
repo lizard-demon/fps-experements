@@ -5,6 +5,7 @@ const world = @import("world.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 const World = world.World;
+const CollisionResult = world.CollisionResult;
 const EPSILON = math.EPSILON;
 const STEP_HEIGHT = math.STEP_HEIGHT;
 const GROUND_SNAP = math.GROUND_SNAP;
@@ -184,24 +185,60 @@ fn tryStep(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?M
     return null;
 }
 
-// Try wall sliding
+// Try wall sliding with proper normal-based collision response
 fn trySlide(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
-    var result = pos;
+    var current_pos = pos;
+    var remaining_delta = delta;
     var moved = false;
     
-    inline for ([_]usize{ 0, 1, 2 }) |axis| {
-        if (@abs(delta.data[axis]) > EPSILON) {
-            var test_pos = result;
-            test_pos.data[axis] += delta.data[axis];
-            const test_aabb = AABB{ .min = Vec3.add(test_pos, aabb.min), .max = Vec3.add(test_pos, aabb.max) };
-            if (!collision_world.testCollision(test_aabb)) {
-                result.data[axis] = test_pos.data[axis];
-                moved = true;
-            }
+    // Allow up to 3 slide iterations to handle corner cases
+    for (0..3) |_| {
+        if (Vec3.length(remaining_delta) < EPSILON) break;
+        
+        // Try to move with the remaining delta
+        const target_pos = Vec3.add(current_pos, remaining_delta);
+        const test_aabb = AABB{ .min = Vec3.add(target_pos, aabb.min), .max = Vec3.add(target_pos, aabb.max) };
+        
+        // Check for collision at target position
+        const collision_info = collision_world.getCollisionInfo(test_aabb);
+        
+        if (!collision_info.hit) {
+            // No collision, we can move to target
+            current_pos = target_pos;
+            moved = true;
+            break;
+        }
+        
+        // We hit something, calculate slide direction
+        const normal = collision_info.normal;
+        
+        // Project remaining movement onto the surface (remove normal component)
+        const dot_product = Vec3.dot(remaining_delta, normal);
+        const slide_delta = Vec3.sub(remaining_delta, Vec3.scale(normal, dot_product));
+        
+        // If the slide delta is too small, we're done
+        if (Vec3.length(slide_delta) < EPSILON) break;
+        
+        // Try to move along the slide direction
+        const slide_target = Vec3.add(current_pos, slide_delta);
+        const slide_aabb = AABB{ .min = Vec3.add(slide_target, aabb.min), .max = Vec3.add(slide_target, aabb.max) };
+        
+        if (!collision_world.testCollision(slide_aabb)) {
+            // Slide movement is clear
+            current_pos = slide_target;
+            moved = true;
+            break;
+        } else {
+            // Still colliding after slide, try a smaller step
+            const step_size = Vec3.length(slide_delta) * 0.5;
+            if (step_size < EPSILON) break;
+            
+            const step_direction = Vec3.normalize(slide_delta);
+            remaining_delta = Vec3.scale(step_direction, step_size);
         }
     }
     
-    return if (moved) .{ .pos = result } else null;
+    return if (moved) .{ .pos = current_pos } else null;
 }
 
 fn findGround(collision_world: *const World, start: Vec3, aabb: AABB) Vec3 {

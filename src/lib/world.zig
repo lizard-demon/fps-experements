@@ -5,6 +5,13 @@ const Vec3 = math.Vec3;
 const AABB = math.AABB;
 const EPSILON = math.EPSILON;
 
+// Collision result with surface normal information
+pub const CollisionResult = struct {
+    hit: bool = false,
+    normal: Vec3 = Vec3.zero(),
+    distance: f32 = 0.0,
+};
+
 // BVH node for spatial acceleration
 pub const BVHNode = struct {
     bounds: AABB,
@@ -79,6 +86,41 @@ pub const Brush = struct {
         }
         
         return true;
+    }
+    
+    // Get collision information including surface normal
+    pub fn getCollisionInfo(self: Brush, aabb: AABB) CollisionResult {
+        if (!self.bounds.intersects(aabb)) return .{};
+        
+        const center = Vec3.scale(Vec3.add(aabb.min, aabb.max), 0.5);
+        const extents = Vec3.scale(Vec3.sub(aabb.max, aabb.min), 0.5);
+        
+        var closest_distance: f32 = std.math.floatMax(f32);
+        var collision_normal = Vec3.zero();
+        var has_collision = false;
+        
+        // Find the closest penetrating plane
+        for (self.planes) |plane| {
+            const radius = @abs(plane.normal.data[0] * extents.data[0]) +
+                          @abs(plane.normal.data[1] * extents.data[1]) +
+                          @abs(plane.normal.data[2] * extents.data[2]);
+            
+            const distance = plane.distanceToPoint(center);
+            const penetration = radius - distance;
+            
+            // If penetrating this plane and it's the closest
+            if (penetration > EPSILON and distance < closest_distance) {
+                closest_distance = distance;
+                collision_normal = plane.normal;
+                has_collision = true;
+            }
+        }
+        
+        return .{
+            .hit = has_collision,
+            .normal = collision_normal,
+            .distance = closest_distance,
+        };
     }
 };
 
@@ -392,6 +434,19 @@ pub const World = struct {
         return self.testCollisionBVH(aabb, 0);
     }
     
+    // Get detailed collision information including surface normal
+    pub fn getCollisionInfo(self: *const World, aabb: AABB) CollisionResult {
+        if (self.bvh_nodes.len == 0) {
+            for (self.brushes) |brush| {
+                const result = brush.getCollisionInfo(aabb);
+                if (result.hit) return result;
+            }
+            return .{};
+        }
+        
+        return self.getCollisionInfoBVH(aabb, 0);
+    }
+    
     fn testCollisionBVH(self: *const World, aabb: AABB, node_idx: u32) bool {
         if (node_idx >= self.bvh_nodes.len) return false;
         
@@ -408,5 +463,28 @@ pub const World = struct {
         
         return self.testCollisionBVH(aabb, node.left_child) or
                self.testCollisionBVH(aabb, node.left_child + 1);
+    }
+    
+    fn getCollisionInfoBVH(self: *const World, aabb: AABB, node_idx: u32) CollisionResult {
+        if (node_idx >= self.bvh_nodes.len) return .{};
+        
+        const node = self.bvh_nodes[node_idx];
+        if (!node.bounds.intersects(aabb)) return .{};
+        
+        if (node.isLeaf()) {
+            for (node.brush_start..node.brush_start + node.brush_count) |i| {
+                const brush_idx = self.brush_indices[i];
+                const result = self.brushes[brush_idx].getCollisionInfo(aabb);
+                if (result.hit) return result;
+            }
+            return .{};
+        }
+        
+        // Check left child first
+        const left_result = self.getCollisionInfoBVH(aabb, node.left_child);
+        if (left_result.hit) return left_result;
+        
+        // Check right child
+        return self.getCollisionInfoBVH(aabb, node.left_child + 1);
     }
 };
