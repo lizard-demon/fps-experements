@@ -5,6 +5,7 @@ const world = @import("world.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 const World = world.World;
+const HullType = world.HullType;
 const CollisionResult = world.CollisionResult;
 const EPSILON = math.EPSILON;
 const STEP_HEIGHT = math.STEP_HEIGHT;
@@ -37,6 +38,7 @@ pub const Transform = struct { pos: Vec3 = Vec3.zero() };
 pub const Physics = struct {
     vel: Vec3 = Vec3.zero(),
     on_ground: bool = false,
+    crouching: bool = false, // Add crouching state
 };
 
 pub const Input = struct { 
@@ -55,12 +57,13 @@ pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audi
 }
 
 pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, collision_world: *const World, dt: f32, config: PhysicsConfig) void {
-    const player_aabb = AABB.fromCenterSize(Vec3.zero(), config.player_size);
-    
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
         const fwd: f32 = if (i.keys.w) 1 else if (i.keys.s) -1 else 0;
         const side: f32 = if (i.keys.d) 1 else if (i.keys.a) -1 else 0;
         const jump = i.keys.sp;
+        
+        // Determine hull type based on crouching state
+        const hull_type: HullType = if (p.crouching) .crouching else .standing;
         
         // Gravity
         p.vel.data[1] -= config.gravity * dt;
@@ -104,150 +107,104 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
             }
         }
         
-        // Movement with collision
+        // Movement with collision using new point-based system
         const delta = Vec3.scale(p.vel, dt);
-        const move_result = movePlayer(collision_world, t.pos, delta, player_aabb);
+        const move_result = movePlayerPoint(collision_world, t.pos, delta, hull_type);
         
         // Update position
         t.pos = move_result.pos;
         
         // Check ground state
-        p.on_ground = isOnGround(collision_world, t.pos, player_aabb);
+        p.on_ground = isOnGroundPoint(collision_world, t.pos, hull_type);
         
-        // Apply collision response - if we hit something, adjust velocity
+        // Improved collision response for surfing
         if (move_result.hit) {
-            const actual_delta = Vec3.sub(move_result.pos, t.pos);
-            const intended_delta = delta;
-            
-            // Calculate what part of velocity was blocked
-            const blocked_delta = Vec3.sub(intended_delta, actual_delta);
-            
-            // Remove blocked velocity components
-            if (Vec3.length(blocked_delta) > EPSILON) {
-                // If we moved less than intended, we hit something
-                
-                // Remove velocity in the direction we couldn't move
-                if (@abs(blocked_delta.data[1]) > EPSILON) {
-                    // Vertical collision - stop vertical movement
-                    if (blocked_delta.data[1] > 0) {
-                        p.vel.data[1] = @min(p.vel.data[1], 0); // Hit ceiling
-                    } else {
-                        p.vel.data[1] = @max(p.vel.data[1], 0); // Hit ground
-                    }
-                }
-                
-                // Horizontal collision - apply wall friction
-                const horizontal_blocked = @sqrt(blocked_delta.data[0] * blocked_delta.data[0] + blocked_delta.data[2] * blocked_delta.data[2]);
-                if (horizontal_blocked > EPSILON and p.on_ground) {
-                    const horizontal_speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
-                    if (horizontal_speed > 0.1) {
-                        const factor = @max(0, horizontal_speed - horizontal_speed * config.wall_friction * dt) / horizontal_speed;
-                        p.vel.data[0] *= factor;
-                        p.vel.data[2] *= factor;
-                    }
-                }
+            // Get surface normal at collision point
+            if (collision_world.getPointCollisionNormal(t.pos, hull_type)) |surface_normal| {
+                applySurfingCollisionResponse(&p.vel, surface_normal, dt, config);
             }
         }
     }
 }
 
-// Pike-style movement system - belongs in physics, not world
-pub fn movePlayer(collision_world: *const World, start: Vec3, delta: Vec3, player_aabb: AABB) MoveResult {
+// Modern point-based collision system using expanded geometry
+pub fn movePlayerPoint(collision_world: *const World, start: Vec3, delta: Vec3, hull_type: HullType) MoveResult {
     if (Vec3.length(delta) < EPSILON) return .{ .pos = start };
     
-    return tryDirect(collision_world, start, delta, player_aabb) orelse 
-           tryStep(collision_world, start, delta, player_aabb) orelse 
-           trySlide(collision_world, start, delta, player_aabb) orelse 
+    return tryDirectPoint(collision_world, start, delta, hull_type) orelse 
+           tryStepPoint(collision_world, start, delta, hull_type) orelse 
+           trySlidePoint(collision_world, start, delta, hull_type) orelse 
            .{ .pos = start, .hit = true };
 }
 
-// Try direct movement
-fn tryDirect(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
+fn tryDirectPoint(collision_world: *const World, pos: Vec3, delta: Vec3, hull_type: HullType) ?MoveResult {
     const target = Vec3.add(pos, delta);
-    const test_aabb = AABB{ .min = Vec3.add(target, aabb.min), .max = Vec3.add(target, aabb.max) };
-    return if (!collision_world.testCollision(test_aabb)) .{ .pos = target } else null;
+    return if (!collision_world.testPointCollision(target, hull_type)) .{ .pos = target } else null;
 }
 
-// Try step-up
-fn tryStep(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
+fn tryStepPoint(collision_world: *const World, pos: Vec3, delta: Vec3, hull_type: HullType) ?MoveResult {
     const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
     if (Vec3.length(horizontal) < EPSILON) return null;
     
     const step_pos = Vec3.add(Vec3.add(pos, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
-    const step_aabb = AABB{ .min = Vec3.add(step_pos, aabb.min), .max = Vec3.add(step_pos, aabb.max) };
     
-    if (!collision_world.testCollision(step_aabb)) {
-        const ground_pos = findGround(collision_world, step_pos, aabb);
+    if (!collision_world.testPointCollision(step_pos, hull_type)) {
+        const ground_pos = findGroundPoint(collision_world, step_pos, hull_type);
         const final_pos = Vec3.new(ground_pos.data[0], ground_pos.data[1] + delta.data[1], ground_pos.data[2]);
-        const final_aabb = AABB{ .min = Vec3.add(final_pos, aabb.min), .max = Vec3.add(final_pos, aabb.max) };
-        return if (!collision_world.testCollision(final_aabb)) .{ .pos = final_pos } else .{ .pos = ground_pos };
+        return if (!collision_world.testPointCollision(final_pos, hull_type)) .{ .pos = final_pos } else .{ .pos = ground_pos };
     }
     return null;
 }
 
-// Try wall sliding with proper normal-based collision response
-fn trySlide(collision_world: *const World, pos: Vec3, delta: Vec3, aabb: AABB) ?MoveResult {
+fn trySlidePoint(collision_world: *const World, pos: Vec3, delta: Vec3, hull_type: HullType) ?MoveResult {
     var current_pos = pos;
     var remaining_delta = delta;
     var moved = false;
     
-    // Allow up to 3 slide iterations to handle corner cases
     for (0..3) |_| {
         if (Vec3.length(remaining_delta) < EPSILON) break;
         
-        // Try to move with the remaining delta
         const target_pos = Vec3.add(current_pos, remaining_delta);
-        const test_aabb = AABB{ .min = Vec3.add(target_pos, aabb.min), .max = Vec3.add(target_pos, aabb.max) };
         
-        // Check for collision at target position
-        const collision_info = collision_world.getCollisionInfo(test_aabb);
-        
-        if (!collision_info.hit) {
-            // No collision, we can move to target
+        if (!collision_world.testPointCollision(target_pos, hull_type)) {
             current_pos = target_pos;
             moved = true;
             break;
         }
         
-        // We hit something, calculate slide direction
-        const normal = collision_info.normal;
-        
-        // Project remaining movement onto the surface (remove normal component)
-        const dot_product = Vec3.dot(remaining_delta, normal);
-        const slide_delta = Vec3.sub(remaining_delta, Vec3.scale(normal, dot_product));
-        
-        // If the slide delta is too small, we're done
-        if (Vec3.length(slide_delta) < EPSILON) break;
-        
-        // Try to move along the slide direction
-        const slide_target = Vec3.add(current_pos, slide_delta);
-        const slide_aabb = AABB{ .min = Vec3.add(slide_target, aabb.min), .max = Vec3.add(slide_target, aabb.max) };
-        
-        if (!collision_world.testCollision(slide_aabb)) {
-            // Slide movement is clear
-            current_pos = slide_target;
-            moved = true;
-            break;
-        } else {
-            // Still colliding after slide, try a smaller step
-            const step_size = Vec3.length(slide_delta) * 0.5;
-            if (step_size < EPSILON) break;
+        if (collision_world.getPointCollisionNormal(target_pos, hull_type)) |surface_normal| {
+            const dot_product = Vec3.dot(remaining_delta, surface_normal);
+            const slide_delta = Vec3.sub(remaining_delta, Vec3.scale(surface_normal, dot_product));
             
-            const step_direction = Vec3.normalize(slide_delta);
-            remaining_delta = Vec3.scale(step_direction, step_size);
+            if (Vec3.length(slide_delta) < EPSILON) break;
+            
+            const slide_target = Vec3.add(current_pos, slide_delta);
+            
+            if (!collision_world.testPointCollision(slide_target, hull_type)) {
+                current_pos = slide_target;
+                moved = true;
+                break;
+            } else {
+                const step_size = Vec3.length(slide_delta) * 0.5;
+                if (step_size < EPSILON) break;
+                
+                const step_direction = Vec3.normalize(slide_delta);
+                remaining_delta = Vec3.scale(step_direction, step_size);
+            }
+        } else {
+            break;
         }
     }
     
     return if (moved) .{ .pos = current_pos } else null;
 }
 
-fn findGround(collision_world: *const World, start: Vec3, aabb: AABB) Vec3 {
+fn findGroundPoint(collision_world: *const World, start: Vec3, hull_type: HullType) Vec3 {
     var step_down: f32 = GROUND_SNAP;
     while (step_down <= STEP_HEIGHT + GROUND_SNAP) {
         const test_pos = Vec3.new(start.data[0], start.data[1] - step_down, start.data[2]);
-        const test_aabb = AABB{ .min = Vec3.add(test_pos, aabb.min), .max = Vec3.add(test_pos, aabb.max) };
         
-        if (collision_world.testCollision(test_aabb)) {
+        if (collision_world.testPointCollision(test_pos, hull_type)) {
             return Vec3.new(start.data[0], start.data[1] - (step_down - GROUND_SNAP), start.data[2]);
         }
         step_down += GROUND_SNAP;
@@ -255,8 +212,36 @@ fn findGround(collision_world: *const World, start: Vec3, aabb: AABB) Vec3 {
     return start;
 }
 
-pub fn isOnGround(collision_world: *const World, position: Vec3, aabb: AABB) bool {
+pub fn isOnGroundPoint(collision_world: *const World, position: Vec3, hull_type: HullType) bool {
     const ground_test = Vec3.new(position.data[0], position.data[1] - GROUND_SNAP, position.data[2]);
-    const ground_aabb = AABB{ .min = Vec3.add(ground_test, aabb.min), .max = Vec3.add(ground_test, aabb.max) };
-    return collision_world.testCollision(ground_aabb);
+    return collision_world.testPointCollision(ground_test, hull_type);
+}
+
+fn applySurfingCollisionResponse(velocity: *Vec3, surface_normal: Vec3, dt: f32, config: PhysicsConfig) void {
+    const up_vector = Vec3.new(0, 1, 0);
+    const surface_angle = std.math.acos(@abs(Vec3.dot(surface_normal, up_vector)));
+    
+    const velocity_into_surface = Vec3.dot(velocity.*, surface_normal);
+    if (velocity_into_surface < 0) {
+        velocity.* = Vec3.sub(velocity.*, Vec3.scale(surface_normal, velocity_into_surface));
+    }
+    
+    const horizontal_velocity = Vec3.new(velocity.data[0], 0, velocity.data[2]);
+    const horizontal_speed = Vec3.length(horizontal_velocity);
+    
+    if (horizontal_speed > 0.1) {
+        var friction_factor: f32 = 0;
+        
+        if (surface_angle < 0.7) {
+            friction_factor = config.friction;
+        } else if (surface_angle < 1.2) {
+            friction_factor = config.wall_friction * 0.1;
+        }
+        
+        if (friction_factor > 0) {
+            const factor = @max(0, horizontal_speed - horizontal_speed * friction_factor * dt) / horizontal_speed;
+            velocity.data[0] *= factor;
+            velocity.data[2] *= factor;
+        }
+    }
 }

@@ -88,6 +88,12 @@ pub const AABB = struct {
         return .{ .min = Vec3.min(self.min, other.min), .max = Vec3.max(self.max, other.max) };
     }
     
+    pub fn containsPoint(self: AABB, point: Vec3) bool {
+        return (point.data[0] >= self.min.data[0] and point.data[0] <= self.max.data[0] and
+                point.data[1] >= self.min.data[1] and point.data[1] <= self.max.data[1] and
+                point.data[2] >= self.min.data[2] and point.data[2] <= self.max.data[2]);
+    }
+    
     pub fn surface_area(self: AABB) f32 {
         const d = Vec3.sub(self.max, self.min);
         return 2.0 * (d.data[0] * d.data[1] + d.data[1] * d.data[2] + d.data[2] * d.data[0]);

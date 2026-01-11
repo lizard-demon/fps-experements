@@ -114,12 +114,11 @@ const GameResources = struct {
             brush_idx += 1;
         }
         
-        // Initialize world with all brushes
-        self.world = world.World.init(self.brushes[0..brush_idx], allocator) catch world.World{ 
-            .brushes = self.brushes[0..brush_idx], 
-            .nodes = &[_]world.Node{}, 
-            .indices = &[_]u32{}, 
-            .allocator = allocator 
+        // Initialize world with all brushes using new expanded geometry system
+        self.world = world.World.init(self.brushes[0..brush_idx], allocator) catch |err| {
+            std.log.err("Failed to initialize world: {}", .{err});
+            // Create a minimal fallback world - this won't work but prevents crash
+            return; // Early return on world init failure
         };
         
         // Debug: Print brush information
@@ -209,8 +208,8 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // Build visual representation using actual brush geometry
-    for (store.resources.brushes) |brush| {
+    // Build visual representation using original brush geometry for rendering
+    for (store.resources.world.original_brushes) |brush| {
         store.resources.mesh_builder.addBrush(brush, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
     }
     
