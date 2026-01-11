@@ -4,17 +4,19 @@ const Vec3 = math.Vec3;
 const AABB = math.AABB;
 
 pub const HullType = enum { point, standing, crouching };
-const hull_radii = [_]f32{ 0.0, 0.49, 0.49 }; // point, standing, crouching
+pub const Collision = struct { normal: Vec3 };
+
+const hull_radii = [_]f32{ 0.0, 0.49, 0.49 };
 
 pub const Plane = struct {
     normal: Vec3, distance: f32,
-    pub fn distanceToPoint(self: Plane, point: Vec3) f32 { return Vec3.dot(self.normal, point) + self.distance; }
+    fn distanceToPoint(self: Plane, point: Vec3) f32 { return Vec3.dot(self.normal, point) + self.distance; }
 };
 
 pub const Brush = struct {
     planes: []const Plane, bounds: AABB,
     
-    pub fn expand(self: Brush, radius: f32, allocator: std.mem.Allocator) !Brush {
+    fn expand(self: Brush, radius: f32, allocator: std.mem.Allocator) !Brush {
         if (radius <= 0.0) return .{ .planes = self.planes, .bounds = self.bounds };
         
         const expanded_planes = try allocator.alloc(Plane, self.planes.len);
@@ -24,26 +26,24 @@ pub const Brush = struct {
         return .{ .planes = expanded_planes, .bounds = .{ .min = Vec3.sub(self.bounds.min, r), .max = Vec3.add(self.bounds.max, r) } };
     }
     
-    pub fn containsPoint(self: Brush, point: Vec3) bool {
-        for (self.planes) |plane| if (plane.distanceToPoint(point) > math.EPSILON) return false;
-        return true;
-    }
-    
-    pub fn getClosestSurfaceNormal(self: Brush, point: Vec3) ?Vec3 {
-        var closest_distance: f32 = std.math.floatMax(f32);
+    fn check(self: Brush, point: Vec3) ?Collision {
         var closest_normal: ?Vec3 = null;
+        var closest_distance: f32 = std.math.floatMax(f32);
+        
         for (self.planes) |plane| {
             const distance = plane.distanceToPoint(point);
-            if (distance <= math.EPSILON and distance > -closest_distance) {
+            if (distance > math.EPSILON) return null;
+            if (distance > -closest_distance) {
                 closest_distance = -distance;
                 closest_normal = plane.normal;
             }
         }
-        return closest_normal;
+        
+        return if (closest_normal) |normal| Collision{ .normal = normal } else null;
     }
 };
 
-pub const Node = packed struct {
+const Node = packed struct {
     min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32,
     first: u32, count: u30, axis: u2,
     
@@ -51,12 +51,11 @@ pub const Node = packed struct {
     fn isLeaf(self: Node) bool { return self.axis == 3; }
     fn left(self: Node) u32 { return self.first; }
 };
-comptime { if (@sizeOf(Node) != 32) @compileError("Node must be 32 bytes"); }
 
 const CollisionWorld = struct {
     brushes: []const Brush, nodes: []Node, indices: []u32, allocator: std.mem.Allocator,
     
-    pub fn init(brushes: []const Brush, allocator: std.mem.Allocator) !CollisionWorld {
+    fn init(brushes: []const Brush, allocator: std.mem.Allocator) !CollisionWorld {
         if (brushes.len == 0) return .{ .brushes = brushes, .nodes = &[_]Node{}, .indices = &[_]u32{}, .allocator = allocator };
         
         const indices = try allocator.alloc(u32, brushes.len);
@@ -67,36 +66,14 @@ const CollisionWorld = struct {
         return world;
     }
     
-    pub fn deinit(self: *CollisionWorld) void {
+    fn deinit(self: *CollisionWorld) void {
         self.allocator.free(self.nodes);
         self.allocator.free(self.indices);
     }
     
-    pub fn testPointCollision(self: *const CollisionWorld, point: Vec3) bool {
+    fn check(self: *const CollisionWorld, point: Vec3) ?Collision {
         if (self.nodes.len == 0) {
-            for (self.brushes) |brush| if (brush.containsPoint(point)) return true;
-            return false;
-        }
-        
-        var node_idx: u32 = 0;
-        while (node_idx < self.nodes.len) {
-            const node = self.nodes[node_idx];
-            if (!node.bounds().containsPoint(point)) { node_idx += 1; continue; }
-            
-            if (node.isLeaf()) {
-                for (node.first..node.first + node.count) |i| 
-                    if (self.brushes[self.indices[i]].containsPoint(point)) return true;
-                node_idx += 1;
-            } else {
-                node_idx = node.left();
-            }
-        }
-        return false;
-    }
-    
-    pub fn getPointCollisionNormal(self: *const CollisionWorld, point: Vec3) ?Vec3 {
-        if (self.nodes.len == 0) {
-            for (self.brushes) |brush| if (brush.containsPoint(point)) return brush.getClosestSurfaceNormal(point);
+            for (self.brushes) |brush| if (brush.check(point)) |collision| return collision;
             return null;
         }
         
@@ -106,10 +83,8 @@ const CollisionWorld = struct {
             if (!node.bounds().containsPoint(point)) { node_idx += 1; continue; }
             
             if (node.isLeaf()) {
-                for (node.first..node.first + node.count) |i| {
-                    const brush = self.brushes[self.indices[i]];
-                    if (brush.containsPoint(point)) return brush.getClosestSurfaceNormal(point);
-                }
+                for (node.first..node.first + node.count) |i| 
+                    if (self.brushes[self.indices[i]].check(point)) |collision| return collision;
                 node_idx += 1;
             } else {
                 node_idx = node.left();
@@ -269,7 +244,6 @@ pub const World = struct {
             world.hull_worlds[hull_idx] = try CollisionWorld.init(world.hull_brushes[hull_idx], allocator);
         }
         
-        std.debug.print("World initialized with {} brushes across {} hull types\n", .{ brushes.len, hull_radii.len });
         return world;
     }
     
@@ -285,32 +259,21 @@ pub const World = struct {
         for (&self.hull_worlds) |*hull_world| hull_world.deinit();
     }
     
-    pub fn testPointCollision(self: *const World, point: Vec3, hull_type: HullType) bool {
-        return self.hull_worlds[@intFromEnum(hull_type)].testPointCollision(point);
-    }
-    
-    pub fn getPointCollisionNormal(self: *const World, point: Vec3, hull_type: HullType) ?Vec3 {
-        return self.hull_worlds[@intFromEnum(hull_type)].getPointCollisionNormal(point);
+    pub fn check(self: *const World, point: Vec3, hull_type: HullType) ?Collision {
+        return self.hull_worlds[@intFromEnum(hull_type)].check(point);
     }
 };
 
-// Rendering vertex
+// Rendering
 pub const Vertex = extern struct { pos: [3]f32, col: [4]f32 };
 
-// Mesh builder for rendering
 pub const MeshBuilder = struct {
     vertices: std.ArrayListUnmanaged(Vertex) = .{},
     indices: std.ArrayListUnmanaged(u16) = .{},
     allocator: std.mem.Allocator,
     
-    pub fn init(allocator: std.mem.Allocator) MeshBuilder {
-        return .{ .allocator = allocator };
-    }
-    
-    pub fn deinit(self: *MeshBuilder) void {
-        self.vertices.deinit(self.allocator);
-        self.indices.deinit(self.allocator);
-    }
+    pub fn init(allocator: std.mem.Allocator) MeshBuilder { return .{ .allocator = allocator }; }
+    pub fn deinit(self: *MeshBuilder) void { self.vertices.deinit(self.allocator); self.indices.deinit(self.allocator); }
     
     pub fn addBrush(self: *MeshBuilder, brush: Brush, color: [4]f32) !void {
         var hull_vertices = std.ArrayListUnmanaged(Vec3){};
@@ -319,8 +282,39 @@ pub const MeshBuilder = struct {
         for (0..brush.planes.len) |i| {
             for (i + 1..brush.planes.len) |j| {
                 for (j + 1..brush.planes.len) |k| {
-                    if (intersectThreePlanes(brush.planes[i], brush.planes[j], brush.planes[k])) |vertex| {
-                        if (isVertexInsideBrush(vertex, brush) and !isDuplicateVertex(hull_vertices.items, vertex)) {
+                    // intersect three planes
+                    const intersection = blk: {
+                        const p1 = brush.planes[i];
+                        const p2 = brush.planes[j];
+                        const p3 = brush.planes[k];
+                        const n1 = p1.normal;
+                        const n2 = p2.normal;
+                        const n3 = p3.normal;
+                        
+                        const det = Vec3.dot(n1, Vec3.cross(n2, n3));
+                        if (@abs(det) < math.EPSILON) break :blk null;
+                        
+                        const c1 = Vec3.cross(n2, n3);
+                        const c2 = Vec3.cross(n3, n1);
+                        const c3 = Vec3.cross(n1, n2);
+                        
+                        break :blk Vec3.scale(Vec3.add(Vec3.add(Vec3.scale(c1, -p1.distance), Vec3.scale(c2, -p2.distance)), Vec3.scale(c3, -p3.distance)), 1.0 / det);
+                    };
+                    
+                    if (intersection) |vertex| {
+                        // check if vertex is inside brush
+                        const inside_brush = blk: {
+                            for (brush.planes) |plane| if (plane.distanceToPoint(vertex) > math.EPSILON) break :blk false;
+                            break :blk true;
+                        };
+                        
+                        // check if vertex is duplicate
+                        const is_duplicate = blk: {
+                            for (hull_vertices.items) |existing| if (Vec3.dist(vertex, existing) < math.EPSILON * 10) break :blk true;
+                            break :blk false;
+                        };
+                        
+                        if (inside_brush and !is_duplicate) {
                             try hull_vertices.append(self.allocator, vertex);
                         }
                     }
@@ -329,58 +323,55 @@ pub const MeshBuilder = struct {
         }
         
         if (hull_vertices.items.len < 4) return;
-        try self.generateConvexHull(hull_vertices.items, color);
-    }
-    
-    fn generateConvexHull(self: *MeshBuilder, vertices: []Vec3, color: [4]f32) !void {
-        const base = @as(u16, @intCast(self.vertices.items.len));
-        
-        for (vertices) |v| {
-            try self.vertices.append(self.allocator, .{
-                .pos = .{ v.data[0], v.data[1], v.data[2] },
-                .col = color
-            });
-        }
-        
-        for (0..vertices.len) |i| {
-            for (i + 1..vertices.len) |j| {
-                for (j + 1..vertices.len) |k| {
-                    const v0 = vertices[i];
-                    const v1 = vertices[j]; 
-                    const v2 = vertices[k];
-                    
-                    const edge1 = Vec3.sub(v1, v0);
-                    const edge2 = Vec3.sub(v2, v0);
-                    const normal = Vec3.cross(edge1, edge2);
-                    
-                    if (Vec3.length(normal) < math.EPSILON) continue;
-                    
-                    var is_hull_face = true;
-                    var side_sign: ?f32 = null;
-                    
-                    for (vertices, 0..) |test_vertex, idx| {
-                        if (idx == i or idx == j or idx == k) continue;
+        // generate convex hull
+        {
+            const vertices = hull_vertices.items;
+            const base = @as(u16, @intCast(self.vertices.items.len));
+            
+            for (vertices) |v| {
+                try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = color });
+            }
+            
+            for (0..vertices.len) |i| {
+                for (i + 1..vertices.len) |j| {
+                    for (j + 1..vertices.len) |k| {
+                        const v0 = vertices[i];
+                        const v1 = vertices[j]; 
+                        const v2 = vertices[k];
                         
-                        const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
-                        if (@abs(dot) > math.EPSILON) {
-                            if (side_sign == null) {
-                                side_sign = dot;
-                            } else if (side_sign.? * dot < 0) {
-                                is_hull_face = false;
-                                break;
+                        const edge1 = Vec3.sub(v1, v0);
+                        const edge2 = Vec3.sub(v2, v0);
+                        const normal = Vec3.cross(edge1, edge2);
+                        
+                        if (Vec3.length(normal) < math.EPSILON) continue;
+                        
+                        var is_hull_face = true;
+                        var side_sign: ?f32 = null;
+                        
+                        for (vertices, 0..) |test_vertex, idx| {
+                            if (idx == i or idx == j or idx == k) continue;
+                            
+                            const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
+                            if (@abs(dot) > math.EPSILON) {
+                                if (side_sign == null) {
+                                    side_sign = dot;
+                                } else if (side_sign.? * dot < 0) {
+                                    is_hull_face = false;
+                                    break;
+                                }
                             }
                         }
-                    }
-                    
-                    if (is_hull_face) {
-                        if ((side_sign orelse 1) > 0) {
-                            try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
-                            try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
-                            try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
-                        } else {
-                            try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
-                            try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
-                            try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
+                        
+                        if (is_hull_face) {
+                            if ((side_sign orelse 1) > 0) {
+                                try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
+                                try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
+                                try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
+                            } else {
+                                try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
+                                try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
+                                try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
+                            }
                         }
                     }
                 }
@@ -388,47 +379,4 @@ pub const MeshBuilder = struct {
         }
     }
 };
-
-fn intersectThreePlanes(p1: Plane, p2: Plane, p3: Plane) ?Vec3 {
-    const n1 = p1.normal;
-    const n2 = p2.normal;
-    const n3 = p3.normal;
     
-    const det = Vec3.dot(n1, Vec3.cross(n2, n3));
-    if (@abs(det) < math.EPSILON) return null;
-    
-    const c1 = Vec3.cross(n2, n3);
-    const c2 = Vec3.cross(n3, n1);
-    const c3 = Vec3.cross(n1, n2);
-    
-    const point = Vec3.scale(
-        Vec3.add(
-            Vec3.add(
-                Vec3.scale(c1, -p1.distance),
-                Vec3.scale(c2, -p2.distance)
-            ),
-            Vec3.scale(c3, -p3.distance)
-        ),
-        1.0 / det
-    );
-    
-    return point;
-}
-
-fn isVertexInsideBrush(vertex: Vec3, brush: Brush) bool {
-    for (brush.planes) |plane| {
-        if (plane.distanceToPoint(vertex) > math.EPSILON) {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn isDuplicateVertex(vertices: []Vec3, vertex: Vec3) bool {
-    for (vertices) |existing| {
-        if (Vec3.dist(vertex, existing) < math.EPSILON * 10) {
-            return true;
-        }
-    }
-    return false;
-}
