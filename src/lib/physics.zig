@@ -11,7 +11,7 @@ const STEP_HEIGHT = math.STEP_HEIGHT;
 const GROUND_SNAP = math.GROUND_SNAP;
 const COLLISION_MARGIN: f32 = 0.02;
 
-pub const Move = struct { pos: Vec3, collision: ?Collision = null };
+pub const Move = struct { pos: Vec3, collision: ?world.Collision = null };
 
 pub const Config = struct {
     gravity: f32 = 12.0,
@@ -106,7 +106,8 @@ fn applyFriction(vel: *Vec3, dt: f32, friction: f32) void {
 
 fn isOnGround(world_collision: *const World, pos: Vec3, hull_type: HullType) bool {
     const test_pos = Vec3.new(pos.data[0], pos.data[1] - GROUND_SNAP, pos.data[2]);
-    if (world_collision.check(test_pos, hull_type)) |collision| {
+    const capsule = world.Capsule.fromHull(test_pos, hull_type);
+    if (world_collision.checkCapsule(capsule)) |collision| {
         return collision.normal.data[1] > 0.707; // 45 degree slope limit
     }
     return false;
@@ -115,8 +116,9 @@ fn isOnGround(world_collision: *const World, pos: Vec3, hull_type: HullType) boo
 pub fn move(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) Move {
     if (Vec3.length(delta) < EPSILON) return .{ .pos = start };
     
-    // Try direct movement
-    if (world_collision.check(Vec3.add(start, delta), hull_type) == null) {
+    // Try direct movement first
+    const end_capsule = world.Capsule.fromHull(Vec3.add(start, delta), hull_type);
+    if (world_collision.checkCapsule(end_capsule) == null) {
         return .{ .pos = Vec3.add(start, delta) };
     }
     
@@ -125,36 +127,22 @@ pub fn move(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: 
         return step_result;
     }
     
-    // Slide movement
-    return slideMove(world_collision, start, delta, hull_type);
+    // Swept collision with sliding
+    return sweptMove(world_collision, start, delta, hull_type);
 }
 
-fn tryStepUp(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) ?Move {
-    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
-    if (Vec3.length(horizontal) < EPSILON) return null;
-    
-    const step_up = Vec3.add(Vec3.add(start, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
-    if (world_collision.check(step_up, hull_type) != null) return null;
-    
-    const drop_trace = traceMove(world_collision, step_up, Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0), hull_type);
-    const final_pos = Vec3.add(drop_trace.end_pos, Vec3.new(0, delta.data[1], 0));
-    
-    return if (world_collision.check(final_pos, hull_type) == null) 
-        .{ .pos = final_pos } else .{ .pos = drop_trace.end_pos };
-}
-
-fn slideMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_type: HullType) Move {
+fn sweptMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_type: HullType) Move {
     var pos = start;
     var vel = velocity;
     var remaining_time: f32 = 1.0;
-    var first_collision: ?Collision = null;
+    var first_collision: ?world.Collision = null;
     var planes: [3]Vec3 = undefined;
     var num_planes: u32 = 0;
     
     for (0..3) |bump| {
         if (Vec3.length(vel) < EPSILON or remaining_time <= 0.001) break;
         
-        const trace = traceMove(world_collision, pos, Vec3.scale(vel, remaining_time), hull_type);
+        const trace = sweptTrace(world_collision, pos, Vec3.scale(vel, remaining_time), hull_type);
         pos = trace.end_pos;
         
         if (trace.collision) |collision| {
@@ -182,28 +170,31 @@ fn slideMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_ty
     return .{ .pos = pos, .collision = first_collision };
 }
 
-const TraceResult = struct { end_pos: Vec3, collision: ?Collision, time: f32 };
+const SweptResult = struct { end_pos: Vec3, collision: ?world.Collision, time: f32 };
 
-fn traceMove(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) TraceResult {
+fn sweptTrace(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) SweptResult {
     const move_length = Vec3.length(delta);
     if (move_length < EPSILON) return .{ .end_pos = start, .collision = null, .time = 1.0 };
     
     var best_time: f32 = 1.0;
-    var collision: ?Collision = null;
+    var collision: ?world.Collision = null;
     
-    // Sample-based collision detection
+    // Swept collision detection using binary search
     const samples = @min(16, @max(4, @as(u32, @intFromFloat(move_length * 10))));
     for (0..samples) |i| {
         const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
-        if (world_collision.check(Vec3.add(start, Vec3.scale(delta, t)), hull_type)) |hit| {
-            best_time = binarySearch(world_collision, start, delta, hull_type, 
-                                   if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
+        const test_pos = Vec3.add(start, Vec3.scale(delta, t));
+        const capsule = world.Capsule.fromHull(test_pos, hull_type);
+        
+        if (world_collision.checkCapsule(capsule)) |hit| {
+            best_time = binarySearchSwept(world_collision, start, delta, hull_type, 
+                                        if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
             collision = hit;
             break;
         }
     }
     
-    // Apply margin
+    // Apply collision margin
     if (collision != null) {
         best_time = @max(0, best_time - COLLISION_MARGIN / move_length);
     }
@@ -211,12 +202,31 @@ fn traceMove(world_collision: *const World, start: Vec3, delta: Vec3, hull_type:
     return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .collision = collision, .time = best_time };
 }
 
-fn binarySearch(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType, low: f32, high: f32) f32 {
+fn tryStepUp(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) ?Move {
+    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
+    if (Vec3.length(horizontal) < EPSILON) return null;
+    
+    const step_up = Vec3.add(Vec3.add(start, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
+    const step_capsule = world.Capsule.fromHull(step_up, hull_type);
+    if (world_collision.checkCapsule(step_capsule) != null) return null;
+    
+    const drop_trace = sweptTrace(world_collision, step_up, Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0), hull_type);
+    const final_pos = Vec3.add(drop_trace.end_pos, Vec3.new(0, delta.data[1], 0));
+    
+    const final_capsule = world.Capsule.fromHull(final_pos, hull_type);
+    return if (world_collision.checkCapsule(final_capsule) == null) 
+        .{ .pos = final_pos } else .{ .pos = drop_trace.end_pos };
+}
+
+fn binarySearchSwept(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType, low: f32, high: f32) f32 {
     var l = low;
     var h = high;
     for (0..8) |_| {
         const mid = (l + h) * 0.5;
-        if (world_collision.check(Vec3.add(start, Vec3.scale(delta, mid)), hull_type) != null) {
+        const test_pos = Vec3.add(start, Vec3.scale(delta, mid));
+        const capsule = world.Capsule.fromHull(test_pos, hull_type);
+        
+        if (world_collision.checkCapsule(capsule) != null) {
             h = mid;
         } else {
             l = mid;

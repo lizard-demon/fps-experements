@@ -208,7 +208,7 @@ export fn init() void {
     store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
-    // Build visual representation using original brush geometry for rendering
+    // Build visual representation using original brushes for rendering
     for (store.resources.world.original_brushes) |brush| {
         store.resources.mesh_builder.addBrush(brush, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
     }
