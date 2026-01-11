@@ -92,11 +92,33 @@ const GameResources = struct {
         self.brushes[brush_idx] = .{ .planes = self.brush_planes[plane_idx..plane_idx+6], .bounds = AABB.new(Vec3.new(ramp_center.data[0] - 1, 0.5, ramp_center.data[2] - 1), Vec3.new(ramp_center.data[0] + 1, 2.5, ramp_center.data[2] + 1)) };
         plane_idx += 6; brush_idx += 1;
         
+        // Add more test brushes to see SAH splitting in action
+        var test_brush_idx: u32 = 0;
+        while (test_brush_idx < 10 and brush_idx < self.brushes.len and plane_idx + 6 <= self.brush_planes.len) : (test_brush_idx += 1) {
+            const x = @as(f32, @floatFromInt(test_brush_idx)) * 3.0 - 15.0;
+            const z = if (test_brush_idx % 2 == 0) @as(f32, 5.0) else @as(f32, -5.0);
+            
+            // Create a small box at position (x, 1, z)
+            self.brush_planes[plane_idx + 0] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -(x + 0.5) };
+            self.brush_planes[plane_idx + 1] = .{ .normal = Vec3.new(-1,  0,  0), .distance = x - 0.5 };
+            self.brush_planes[plane_idx + 2] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -2.0 };
+            self.brush_planes[plane_idx + 3] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 1.0 };
+            self.brush_planes[plane_idx + 4] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -(z + 0.5) };
+            self.brush_planes[plane_idx + 5] = .{ .normal = Vec3.new( 0,  0, -1), .distance = z - 0.5 };
+            
+            self.brushes[brush_idx] = .{ 
+                .planes = self.brush_planes[plane_idx..plane_idx+6], 
+                .bounds = AABB.new(Vec3.new(x - 0.5, 1.0, z - 0.5), Vec3.new(x + 0.5, 2.0, z + 0.5)) 
+            };
+            plane_idx += 6; 
+            brush_idx += 1;
+        }
+        
         // Initialize world with all brushes
         self.world = world.World.init(self.brushes[0..brush_idx], allocator) catch world.World{ 
             .brushes = self.brushes[0..brush_idx], 
-            .bvh_nodes = &[_]world.BVHNode{}, 
-            .brush_indices = &[_]u32{}, 
+            .nodes = &[_]world.Node{}, 
+            .indices = &[_]u32{}, 
             .allocator = allocator 
         };
         

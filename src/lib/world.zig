@@ -1,43 +1,28 @@
-// Minimal world system - just BVH traversal and brush collision
 const std = @import("std");
 const math = @import("math.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
-const EPSILON = math.EPSILON;
 
-// Collision result with surface normal information
-pub const CollisionResult = struct {
-    hit: bool = false,
-    normal: Vec3 = Vec3.zero(),
-    distance: f32 = 0.0,
-};
+pub const CollisionResult = struct { hit: bool = false, normal: Vec3 = Vec3.zero(), distance: f32 = 0.0 };
 
-// BVH node for spatial acceleration
-pub const BVHNode = struct {
-    bounds: AABB,
-    brush_start: u32,
-    brush_count: u32,
-    left_child: u32,  // 0 = no child (leaf)
+pub const Node = packed struct {
+    min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32,
+    first: u32, count: u30, axis: u2,
     
-    fn isLeaf(self: BVHNode) bool {
-        return self.left_child == 0;
-    }
+    fn bounds(self: Node) AABB { return AABB{ .min = Vec3.new(self.min_x, self.min_y, self.min_z), .max = Vec3.new(self.max_x, self.max_y, self.max_z) }; }
+    fn setBounds(self: *Node, aabb: AABB) void { self.min_x = aabb.min.data[0]; self.min_y = aabb.min.data[1]; self.min_z = aabb.min.data[2]; self.max_x = aabb.max.data[0]; self.max_y = aabb.max.data[1]; self.max_z = aabb.max.data[2]; }
+    fn isLeaf(self: Node) bool { return self.axis == 3; }
+    fn left(self: Node) u32 { return self.first; }
 };
+comptime { if (@sizeOf(Node) != 32) @compileError("Node must be 32 bytes"); }
 
-// Core geometric primitive
 pub const Plane = struct {
-    normal: Vec3,
-    distance: f32,
-    
-    pub fn distanceToPoint(self: Plane, point: Vec3) f32 {
-        return Vec3.dot(self.normal, point) + self.distance;
-    }
+    normal: Vec3, distance: f32,
+    pub fn distanceToPoint(self: Plane, point: Vec3) f32 { return Vec3.dot(self.normal, point) + self.distance; }
 };
 
-// Convex brush defined by planes
 pub const Brush = struct {
-    planes: []const Plane,
-    bounds: AABB,
+    planes: []const Plane, bounds: AABB,
     
     pub fn intersects(self: Brush, aabb: AABB) bool {
         // Quick bounds check first
@@ -62,7 +47,7 @@ pub const Brush = struct {
         for (corners) |corner| {
             var inside = true;
             for (self.planes) |plane| {
-                if (plane.distanceToPoint(corner) > EPSILON) {
+                if (plane.distanceToPoint(corner) > math.EPSILON) {
                     inside = false;
                     break;
                 }
@@ -71,7 +56,6 @@ pub const Brush = struct {
         }
         
         // Also check if the brush intersects the AABB using separating axis theorem
-        // Check each plane as a potential separating axis
         for (self.planes) |plane| {
             const center = Vec3.scale(Vec3.add(aabb.min, aabb.max), 0.5);
             const extents = Vec3.scale(Vec3.sub(aabb.max, aabb.min), 0.5);
@@ -80,11 +64,8 @@ pub const Brush = struct {
                           @abs(plane.normal.data[2] * extents.data[2]);
             
             const distance = plane.distanceToPoint(center);
-            
-            // If AABB is completely outside this plane, no intersection
-            if (distance > radius + EPSILON) return false;
+            if (distance > radius + math.EPSILON) return false;
         }
-        
         return true;
     }
     
@@ -109,18 +90,14 @@ pub const Brush = struct {
             const penetration = radius - distance;
             
             // If penetrating this plane and it's the closest
-            if (penetration > EPSILON and distance < closest_distance) {
+            if (penetration > math.EPSILON and distance < closest_distance) {
                 closest_distance = distance;
                 collision_normal = plane.normal;
                 has_collision = true;
             }
         }
         
-        return .{
-            .hit = has_collision,
-            .normal = collision_normal,
-            .distance = closest_distance,
-        };
+        return .{ .hit = has_collision, .normal = collision_normal, .distance = closest_distance };
     }
 };
 
@@ -194,7 +171,7 @@ pub const MeshBuilder = struct {
                     const edge2 = Vec3.sub(v2, v0);
                     const normal = Vec3.cross(edge1, edge2);
                     
-                    if (Vec3.length(normal) < EPSILON) continue;
+                    if (Vec3.length(normal) < math.EPSILON) continue;
                     
                     // Check if all other vertices are on one side (convex hull property)
                     var is_hull_face = true;
@@ -204,7 +181,7 @@ pub const MeshBuilder = struct {
                         if (idx == i or idx == j or idx == k) continue;
                         
                         const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
-                        if (@abs(dot) > EPSILON) {
+                        if (@abs(dot) > math.EPSILON) {
                             if (side_sign == null) {
                                 side_sign = dot;
                             } else if (side_sign.? * dot < 0) {
@@ -241,7 +218,7 @@ fn intersectThreePlanes(p1: Plane, p2: Plane, p3: Plane) ?Vec3 {
     // Calculate the determinant of the normal matrix
     const det = Vec3.dot(n1, Vec3.cross(n2, n3));
     
-    if (@abs(det) < EPSILON) return null; // Planes are parallel or coplanar
+    if (@abs(det) < math.EPSILON) return null; // Planes are parallel or coplanar
     
     // Calculate the intersection point using Cramer's rule
     const c1 = Vec3.cross(n2, n3);
@@ -265,7 +242,7 @@ fn intersectThreePlanes(p1: Plane, p2: Plane, p3: Plane) ?Vec3 {
 // Check if a vertex is inside a brush (satisfies all plane constraints)
 fn isVertexInsideBrush(vertex: Vec3, brush: Brush) bool {
     for (brush.planes) |plane| {
-        if (plane.distanceToPoint(vertex) > EPSILON) {
+        if (plane.distanceToPoint(vertex) > math.EPSILON) {
             return false;
         }
     }
@@ -275,168 +252,200 @@ fn isVertexInsideBrush(vertex: Vec3, brush: Brush) bool {
 // Check for duplicate vertices within epsilon tolerance
 fn isDuplicateVertex(vertices: []Vec3, vertex: Vec3) bool {
     for (vertices) |existing| {
-        if (Vec3.dist(vertex, existing) < EPSILON * 10) {
+        if (Vec3.dist(vertex, existing) < math.EPSILON * 10) {
             return true;
         }
     }
     return false;
 }
 
-// World with BVH for fast collision queries
+const BuildNode = struct { bounds: AABB, start: u32, count: u32, left: ?*BuildNode = null, right: ?*BuildNode = null };
+
 pub const World = struct {
     brushes: []const Brush,
-    bvh_nodes: []BVHNode,
-    brush_indices: []u32,
+    nodes: []Node,
+    indices: []u32,
     allocator: std.mem.Allocator,
     
     pub fn init(brushes: []const Brush, allocator: std.mem.Allocator) !World {
         if (brushes.len == 0) {
-            return World{ 
-                .brushes = brushes, 
-                .bvh_nodes = &[_]BVHNode{}, 
-                .brush_indices = &[_]u32{}, 
-                .allocator = allocator 
-            };
+            return World{ .brushes = brushes, .nodes = &[_]Node{}, .indices = &[_]u32{}, .allocator = allocator };
         }
         
-        const max_nodes = brushes.len * 2;
-        const bvh_nodes = try allocator.alloc(BVHNode, max_nodes);
-        const brush_indices = try allocator.alloc(u32, brushes.len);
+        const indices = try allocator.alloc(u32, brushes.len);
+        for (indices, 0..) |*idx, i| idx.* = @intCast(i);
         
-        for (brush_indices, 0..) |*idx, i| {
-            idx.* = @intCast(i);
-        }
+        var world = World{ .brushes = brushes, .nodes = undefined, .indices = indices, .allocator = allocator };
+        world.nodes = try world.build();
         
-        var world = World{
-            .brushes = brushes,
-            .bvh_nodes = bvh_nodes,
-            .brush_indices = brush_indices,
-            .allocator = allocator,
-        };
-        
-        const node_count = world.buildBVH(0, @intCast(brushes.len), 0);
-        world.bvh_nodes = world.bvh_nodes[0..node_count];
-        
+        std.debug.print("BVH built: {} nodes, {} leaves\n", .{ world.nodes.len, world.countLeaves() });
         return world;
     }
     
     pub fn deinit(self: *World) void {
-        self.allocator.free(self.bvh_nodes);
-        self.allocator.free(self.brush_indices);
+        self.allocator.free(self.nodes);
+        self.allocator.free(self.indices);
     }
     
-    // SAH-based BVH construction
-    fn buildBVH(self: *World, start: u32, count: u32, node_idx: u32) u32 {
-        if (node_idx >= self.bvh_nodes.len) return node_idx;
+    fn build(self: *World) ![]Node {
+        if (self.brushes.len == 0) return try self.allocator.alloc(Node, 0);
+        var nodes = std.ArrayListUnmanaged(Node){};
+        defer nodes.deinit(self.allocator);
+        _ = try self.buildRecursive(0, @intCast(self.brushes.len), &nodes);
+        return try self.layoutBreadthFirst(nodes.items);
+    }
+    
+    fn buildRecursive(self: *World, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node)) !u32 {
+        const node_idx = @as(u32, @intCast(nodes.items.len));
+        var bounds = self.brushes[self.indices[start]].bounds;
+        for (start + 1..start + count) |i| bounds = bounds.union_with(self.brushes[self.indices[i]].bounds);
         
-        var bounds = self.brushes[self.brush_indices[start]].bounds;
-        for (start + 1..start + count) |i| {
-            bounds = bounds.union_with(self.brushes[self.brush_indices[i]].bounds);
-        }
+        try nodes.append(self.allocator, Node{
+            .min_x = bounds.min.data[0], .min_y = bounds.min.data[1], .min_z = bounds.min.data[2],
+            .max_x = bounds.max.data[0], .max_y = bounds.max.data[1], .max_z = bounds.max.data[2],
+            .first = start, .count = @intCast(count), .axis = 3,
+        });
         
-        self.bvh_nodes[node_idx] = BVHNode{
-            .bounds = bounds,
-            .brush_start = start,
-            .brush_count = count,
-            .left_child = 0,
-        };
+        if (count <= 4) return node_idx;
         
-        if (count <= 4) return node_idx + 1;
+        const split = self.findBestSplit(start, count, bounds);
+        if (split.cost >= @as(f32, @floatFromInt(count))) return node_idx;
         
+        const split_idx = self.partition(start, count, split.axis, split.pos);
+        const left_count = split_idx - start;
+        const right_count = (start + count) - split_idx;
+        if (left_count == 0 or right_count == 0) return node_idx;
+        
+        const left_child = try self.buildRecursive(start, left_count, nodes);
+        _ = try self.buildRecursive(split_idx, right_count, nodes);
+        
+        nodes.items[node_idx].first = left_child;
+        nodes.items[node_idx].count = 0;
+        nodes.items[node_idx].axis = @intCast(split.axis);
+        return node_idx;
+    }
+    
+    const SplitResult = struct { axis: u32, pos: f32, cost: f32 };
+    
+    fn findBestSplit(self: *World, start: u32, count: u32, bounds: AABB) SplitResult {
         var best_cost = std.math.floatMax(f32);
         var best_axis: u32 = 0;
-        var best_split: u32 = start + count / 2;
-        
+        var best_pos: f32 = 0;
         const parent_area = bounds.surface_area();
+        if (parent_area <= 0) return SplitResult{ .axis = 0, .pos = 0, .cost = best_cost };
         
         for (0..3) |axis| {
-            self.sortBrushesByAxis(start, count, axis);
-            
-            var split = start + 1;
-            while (split < start + count) : (split += 1) {
-                var left_bounds = self.brushes[self.brush_indices[start]].bounds;
-                for (start + 1..split) |i| {
-                    left_bounds = left_bounds.union_with(self.brushes[self.brush_indices[i]].bounds);
+            for (start..start + count) |i| {
+                const brush_bounds = self.brushes[self.indices[i]].bounds;
+                const split_pos = (brush_bounds.min.data[axis] + brush_bounds.max.data[axis]) * 0.5;
+                
+                var left_bounds: ?AABB = null;
+                var right_bounds: ?AABB = null;
+                var left_count: u32 = 0;
+                var right_count: u32 = 0;
+                
+                for (start..start + count) |j| {
+                    const prim_bounds = self.brushes[self.indices[j]].bounds;
+                    const centroid = (prim_bounds.min.data[axis] + prim_bounds.max.data[axis]) * 0.5;
+                    
+                    if (centroid < split_pos) {
+                        left_count += 1;
+                        left_bounds = if (left_bounds) |lb| lb.union_with(prim_bounds) else prim_bounds;
+                    } else {
+                        right_count += 1;
+                        right_bounds = if (right_bounds) |rb| rb.union_with(prim_bounds) else prim_bounds;
+                    }
                 }
                 
-                var right_bounds = self.brushes[self.brush_indices[split]].bounds;
-                for (split + 1..start + count) |i| {
-                    right_bounds = right_bounds.union_with(self.brushes[self.brush_indices[i]].bounds);
-                }
+                if (left_count == 0 or right_count == 0) continue;
                 
-                const left_area = left_bounds.surface_area();
-                const right_area = right_bounds.surface_area();
-                const left_count = split - start;
-                const right_count = (start + count) - split;
-                
-                const cost = 1.0 + 
-                    (left_area / parent_area) * @as(f32, @floatFromInt(left_count)) +
-                    (right_area / parent_area) * @as(f32, @floatFromInt(right_count));
+                const left_area = if (left_bounds) |lb| lb.surface_area() else 0;
+                const right_area = if (right_bounds) |rb| rb.surface_area() else 0;
+                const cost = 0.3 + (left_area / parent_area) * @as(f32, @floatFromInt(left_count)) + (right_area / parent_area) * @as(f32, @floatFromInt(right_count));
                 
                 if (cost < best_cost) {
                     best_cost = cost;
                     best_axis = @intCast(axis);
-                    best_split = split;
+                    best_pos = split_pos;
                 }
             }
         }
-        
-        self.sortBrushesByAxis(start, count, best_axis);
-        
-        var split_pos = start + count / 2;
-        for (start..start + count) |i| {
-            if (i >= best_split) {
-                split_pos = @intCast(i);
-                break;
-            }
-        }
-        
-        const left_child_idx = node_idx + 1;
-        self.bvh_nodes[node_idx].left_child = left_child_idx;
-        
-        const left_count = split_pos - start;
-        const right_count = (start + count) - split_pos;
-        
-        var next_idx = self.buildBVH(start, left_count, left_child_idx);
-        next_idx = self.buildBVH(split_pos, right_count, next_idx);
-        
-        return next_idx;
+        return SplitResult{ .axis = best_axis, .pos = best_pos, .cost = best_cost };
     }
     
-    fn sortBrushesByAxis(self: *World, start: u32, count: u32, axis: usize) void {
-        for (start + 1..start + count) |i| {
-            const key = self.brush_indices[i];
-            const key_bounds = self.brushes[key].bounds;
-            const key_center = (key_bounds.min.data[axis] + key_bounds.max.data[axis]) * 0.5;
+    fn partition(self: *World, start: u32, count: u32, axis: u32, split_pos: f32) u32 {
+        var left = start;
+        var right = start + count - 1;
+        while (left <= right) {
+            const centroid = (self.brushes[self.indices[left]].bounds.min.data[axis] + self.brushes[self.indices[left]].bounds.max.data[axis]) * 0.5;
+            if (centroid < split_pos) {
+                left += 1;
+            } else {
+                const temp = self.indices[left];
+                self.indices[left] = self.indices[right];
+                self.indices[right] = temp;
+                if (right == 0) break;
+                right -= 1;
+            }
+        }
+        return left;
+    }
+    
+    fn layoutBreadthFirst(self: *World, tree_nodes: []Node) ![]Node {
+        if (tree_nodes.len == 0) return try self.allocator.alloc(Node, 0);
+        const nodes = try self.allocator.alloc(Node, tree_nodes.len);
+        var queue: [256]u32 = undefined;
+        var queue_head: u32 = 0;
+        var queue_tail: u32 = 1;
+        queue[0] = 0;
+        var write_idx: u32 = 0;
+        
+        while (queue_head < queue_tail and write_idx < nodes.len) {
+            const tree_idx = queue[queue_head];
+            queue_head += 1;
+            const tree_node = tree_nodes[tree_idx];
+            nodes[write_idx] = tree_node;
             
-            var j = i;
-            while (j > start) {
-                const prev_bounds = self.brushes[self.brush_indices[j - 1]].bounds;
-                const prev_center = (prev_bounds.min.data[axis] + prev_bounds.max.data[axis]) * 0.5;
-                if (prev_center <= key_center) break;
+            if (!tree_node.isLeaf() and queue_tail + 1 < queue.len) {
+                const left_tree_idx = tree_node.first;
+                const right_tree_idx = left_tree_idx + 1;
+                const left_bf_idx = write_idx + (queue_tail - queue_head) + 1;
+                nodes[write_idx].first = left_bf_idx;
                 
-                self.brush_indices[j] = self.brush_indices[j - 1];
-                j -= 1;
+                if (left_tree_idx < tree_nodes.len) { queue[queue_tail] = left_tree_idx; queue_tail += 1; }
+                if (right_tree_idx < tree_nodes.len) { queue[queue_tail] = right_tree_idx; queue_tail += 1; }
             }
-            self.brush_indices[j] = key;
+            write_idx += 1;
         }
+        return nodes[0..write_idx];
     }
     
-    // Core collision query - just returns true/false
+    // Stackless traversal
     pub fn testCollision(self: *const World, aabb: AABB) bool {
-        if (self.bvh_nodes.len == 0) {
-            for (self.brushes) |brush| {
-                if (brush.intersects(aabb)) return true;
-            }
+        if (self.nodes.len == 0) {
+            for (self.brushes) |brush| if (brush.intersects(aabb)) return true;
             return false;
         }
         
-        return self.testCollisionBVH(aabb, 0);
+        var node_idx: u32 = 0;
+        while (node_idx < self.nodes.len) {
+            const node = self.nodes[node_idx];
+            if (!node.bounds().intersects(aabb)) { node_idx += 1; continue; }
+            
+            if (node.isLeaf()) {
+                for (node.first..node.first + node.count) |i| {
+                    if (self.brushes[self.indices[i]].intersects(aabb)) return true;
+                }
+                node_idx += 1;
+            } else {
+                node_idx = node.left();
+            }
+        }
+        return false;
     }
     
-    // Get detailed collision information including surface normal
     pub fn getCollisionInfo(self: *const World, aabb: AABB) CollisionResult {
-        if (self.bvh_nodes.len == 0) {
+        if (self.nodes.len == 0) {
             for (self.brushes) |brush| {
                 const result = brush.getCollisionInfo(aabb);
                 if (result.hit) return result;
@@ -444,47 +453,27 @@ pub const World = struct {
             return .{};
         }
         
-        return self.getCollisionInfoBVH(aabb, 0);
+        var node_idx: u32 = 0;
+        while (node_idx < self.nodes.len) {
+            const node = self.nodes[node_idx];
+            if (!node.bounds().intersects(aabb)) { node_idx += 1; continue; }
+            
+            if (node.isLeaf()) {
+                for (node.first..node.first + node.count) |i| {
+                    const result = self.brushes[self.indices[i]].getCollisionInfo(aabb);
+                    if (result.hit) return result;
+                }
+                node_idx += 1;
+            } else {
+                node_idx = node.left();
+            }
+        }
+        return .{};
     }
     
-    fn testCollisionBVH(self: *const World, aabb: AABB, node_idx: u32) bool {
-        if (node_idx >= self.bvh_nodes.len) return false;
-        
-        const node = self.bvh_nodes[node_idx];
-        if (!node.bounds.intersects(aabb)) return false;
-        
-        if (node.isLeaf()) {
-            for (node.brush_start..node.brush_start + node.brush_count) |i| {
-                const brush_idx = self.brush_indices[i];
-                if (self.brushes[brush_idx].intersects(aabb)) return true;
-            }
-            return false;
-        }
-        
-        return self.testCollisionBVH(aabb, node.left_child) or
-               self.testCollisionBVH(aabb, node.left_child + 1);
-    }
-    
-    fn getCollisionInfoBVH(self: *const World, aabb: AABB, node_idx: u32) CollisionResult {
-        if (node_idx >= self.bvh_nodes.len) return .{};
-        
-        const node = self.bvh_nodes[node_idx];
-        if (!node.bounds.intersects(aabb)) return .{};
-        
-        if (node.isLeaf()) {
-            for (node.brush_start..node.brush_start + node.brush_count) |i| {
-                const brush_idx = self.brush_indices[i];
-                const result = self.brushes[brush_idx].getCollisionInfo(aabb);
-                if (result.hit) return result;
-            }
-            return .{};
-        }
-        
-        // Check left child first
-        const left_result = self.getCollisionInfoBVH(aabb, node.left_child);
-        if (left_result.hit) return left_result;
-        
-        // Check right child
-        return self.getCollisionInfoBVH(aabb, node.left_child + 1);
+    fn countLeaves(self: *const World) u32 {
+        var count: u32 = 0;
+        for (self.nodes) |node| { if (node.isLeaf()) count += 1; }
+        return count;
     }
 };
