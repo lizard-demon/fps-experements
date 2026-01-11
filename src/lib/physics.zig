@@ -19,7 +19,6 @@ pub const Config = struct {
     air_speed: f32 = 0.7,
     acceleration: f32 = 70.0,
     friction: f32 = 5.0,
-    wall_friction: f32 = 2.0,
     jump_sound_duration: f32 = 0.15,
 };
 
@@ -74,11 +73,11 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
             }
         }
         
-        // Friction
+        // Simple friction - only when on ground
         if (p.on_ground) {
             const speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
             if (speed > 0.1) {
-                const factor = @max(0, speed - @max(speed, 0.1) * config.friction * dt) / speed;
+                const factor = @max(0, speed - speed * config.friction * dt) / speed;
                 p.vel.data[0] *= factor; 
                 p.vel.data[2] *= factor;
             } else { 
@@ -97,33 +96,13 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
             break :blk collision_world.check(ground_test, hull_type) != null;
         };
         
-        // Collision response
+        // Simple collision response - only redirect when being pushed into surface
         if (move_result.collision) |collision| {
-            // apply surfing response
-            const up_vector = Vec3.new(0, 1, 0);
-            const surface_angle = std.math.acos(@abs(Vec3.dot(collision.normal, up_vector)));
-            
-            // Remove velocity going into surface
             const velocity_into_surface = Vec3.dot(p.vel, collision.normal);
+            
+            // Only redirect velocity if moving into the surface
             if (velocity_into_surface < 0) {
                 p.vel = Vec3.sub(p.vel, Vec3.scale(collision.normal, velocity_into_surface));
-            }
-            
-            // Apply angle-based friction
-            const horizontal_speed = @sqrt(p.vel.data[0] * p.vel.data[0] + p.vel.data[2] * p.vel.data[2]);
-            if (horizontal_speed > 0.1) {
-                var friction_factor: f32 = 0;
-                if (surface_angle < 0.7) {
-                    friction_factor = config.friction;
-                } else if (surface_angle < 1.2) {
-                    friction_factor = config.wall_friction * 0.1;
-                }
-                
-                if (friction_factor > 0) {
-                    const factor = @max(0, horizontal_speed - horizontal_speed * friction_factor * dt) / horizontal_speed;
-                    p.vel.data[0] *= factor;
-                    p.vel.data[2] *= factor;
-                }
             }
         }
     }
@@ -167,33 +146,37 @@ pub fn move(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: 
         }
     }
     
-    // try slide movement
+    // try slide movement - simplified to prevent surfing
     {
         var current_pos = start;
         var remaining_delta = delta;
         var collision: ?Collision = null;
         
-        for (0..3) |_| {
+        // Only allow 2 iterations to prevent complex sliding chains
+        for (0..2) |_| {
             if (Vec3.length(remaining_delta) < EPSILON) break;
             
             const target_pos = Vec3.add(current_pos, remaining_delta);
             
             if (world_collision.check(target_pos, hull_type)) |response| {
                 collision = response;
+                
+                // Simple slide: remove component along normal
                 const dot_product = Vec3.dot(remaining_delta, response.normal);
-                const slide_delta = Vec3.sub(remaining_delta, Vec3.scale(response.normal, dot_product));
-                
-                if (Vec3.length(slide_delta) < EPSILON) break;
-                
-                const slide_target = Vec3.add(current_pos, slide_delta);
-                if (world_collision.check(slide_target, hull_type) == null) {
-                    current_pos = slide_target;
-                    break;
-                } else {
-                    const step_size = Vec3.length(slide_delta) * 0.5;
-                    if (step_size < EPSILON) break;
-                    remaining_delta = Vec3.scale(Vec3.normalize(slide_delta), step_size);
+                if (dot_product < 0) { // Only slide if moving into surface
+                    remaining_delta = Vec3.sub(remaining_delta, Vec3.scale(response.normal, dot_product));
+                    
+                    // Reduce slide distance to prevent excessive momentum preservation
+                    remaining_delta = Vec3.scale(remaining_delta, 0.8);
+                    
+                    if (Vec3.length(remaining_delta) < EPSILON) break;
+                    
+                    const slide_target = Vec3.add(current_pos, remaining_delta);
+                    if (world_collision.check(slide_target, hull_type) == null) {
+                        current_pos = slide_target;
+                    }
                 }
+                break; // Stop after first collision to prevent chaining
             } else {
                 current_pos = target_pos;
                 break;
