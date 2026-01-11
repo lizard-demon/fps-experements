@@ -112,14 +112,13 @@ const BVH = struct {
         var best_collision: ?Collision = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        // Use stack-based traversal
-        var stack: [64]u32 = undefined;
-        var stack_size: u32 = 1;
-        stack[0] = 0;
+        // Use dynamic stack-based traversal
+        var stack = std.ArrayListUnmanaged(u32){};
+        defer stack.deinit(self.allocator);
+        stack.append(self.allocator, 0) catch return null;
         
-        while (stack_size > 0) {
-            stack_size -= 1;
-            const node_idx = stack[stack_size];
+        while (stack.items.len > 0) {
+            const node_idx = stack.orderedRemove(stack.items.len - 1);
             
             if (node_idx >= self.nodes.items.len) continue;
             const node = self.nodes.items[node_idx];
@@ -141,15 +140,11 @@ const BVH = struct {
                 const left_child = node.left();
                 const right_child = left_child + 1;
                 
-                if (stack_size + 2 <= stack.len) {
-                    if (right_child < self.nodes.items.len) {
-                        stack[stack_size] = right_child;
-                        stack_size += 1;
-                    }
-                    if (left_child < self.nodes.items.len) {
-                        stack[stack_size] = left_child;
-                        stack_size += 1;
-                    }
+                if (right_child < self.nodes.items.len) {
+                    stack.append(self.allocator, right_child) catch break;
+                }
+                if (left_child < self.nodes.items.len) {
+                    stack.append(self.allocator, left_child) catch break;
                 }
             }
         }
@@ -159,11 +154,13 @@ const BVH = struct {
     fn build(self: *BVH) ![]Node {
         var nodes = std.ArrayListUnmanaged(Node){};
         defer nodes.deinit(self.allocator);
-        _ = try self.buildRecursive(0, @intCast(self.brushes.len), &nodes);
+        _ = try self.buildRecursive(0, @intCast(self.brushes.len), &nodes, .{});
         return try self.layoutBreadthFirst(nodes.items);
     }
     
-    fn buildRecursive(self: *BVH, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node)) !u32 {
+    fn buildRecursive(self: *BVH, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node), comptime config: struct {
+        max_leaf_size: u32 = 4,
+    }) !u32 {
         const node_idx = @as(u32, @intCast(nodes.items.len));
         var bounds = self.brushes[self.indices.items[start]].bounds;
         for (start + 1..start + count) |i| bounds = bounds.union_with(self.brushes[self.indices.items[i]].bounds);
@@ -174,9 +171,9 @@ const BVH = struct {
             .first = start, .count = @intCast(count), .axis = 3,
         });
         
-        if (count <= 4) return node_idx;
+        if (count <= config.max_leaf_size) return node_idx;
         
-        const split = self.findBestSplit(start, count, bounds);
+        const split = self.findBestSplit(start, count, bounds, .{});
         if (split.cost >= @as(f32, @floatFromInt(count))) return node_idx;
         
         const split_idx = self.partition(start, count, split.axis, split.pos);
@@ -184,8 +181,8 @@ const BVH = struct {
         const right_count = (start + count) - split_idx;
         if (left_count == 0 or right_count == 0) return node_idx;
         
-        const left_child = try self.buildRecursive(start, left_count, nodes);
-        _ = try self.buildRecursive(split_idx, right_count, nodes);
+        const left_child = try self.buildRecursive(start, left_count, nodes, config);
+        _ = try self.buildRecursive(split_idx, right_count, nodes, config);
         
         nodes.items[node_idx].first = left_child;
         nodes.items[node_idx].count = 0;
@@ -195,7 +192,10 @@ const BVH = struct {
     
     const Split = struct { axis: u32, pos: f32, cost: f32 };
     
-    fn findBestSplit(self: *BVH, start: u32, count: u32, bounds: AABB) Split {
+    fn findBestSplit(self: *BVH, start: u32, count: u32, bounds: AABB, comptime config: struct {
+        traversal_cost: f32 = 0.3,
+        epsilon: f32 = 1e-6,
+    }) Split {
         var best = Split{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
         const parent_area = bounds.surface_area();
         if (parent_area <= 0) return best;
@@ -227,7 +227,7 @@ const BVH = struct {
                 
                 const left_area = if (left_bounds) |lb| lb.surface_area() else 0;
                 const right_area = if (right_bounds) |rb| rb.surface_area() else 0;
-                const cost = 0.3 + (left_area / parent_area) * @as(f32, @floatFromInt(left_count)) + (right_area / parent_area) * @as(f32, @floatFromInt(right_count));
+                const cost = config.traversal_cost + (left_area / parent_area) * @as(f32, @floatFromInt(left_count)) + (right_area / parent_area) * @as(f32, @floatFromInt(right_count));
                 
                 if (cost < best.cost) {
                     best = .{ .axis = @intCast(axis), .pos = split_pos, .cost = cost };
@@ -369,60 +369,73 @@ pub const MeshBuilder = struct {
         }
         
         if (hull_vertices.items.len < 4) return;
-        // generate convex hull
-        {
-            const vertices = hull_vertices.items;
-            const base = @as(u16, @intCast(self.vertices.items.len));
-            
-            for (vertices) |v| {
-                try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = color });
-            }
-            
-            for (0..vertices.len) |i| {
-                for (i + 1..vertices.len) |j| {
-                    for (j + 1..vertices.len) |k| {
-                        const v0 = vertices[i];
-                        const v1 = vertices[j]; 
-                        const v2 = vertices[k];
+        
+        // Generate convex hull using gift wrapping (simpler than previous O(n⁴) approach)
+        const hull_faces = try self.generateConvexHullFaces(hull_vertices.items);
+        defer self.allocator.free(hull_faces);
+        
+        const base = @as(u16, @intCast(self.vertices.items.len));
+        
+        for (hull_vertices.items) |v| {
+            try self.vertices.append(self.allocator, .{ .pos = .{ v.data[0], v.data[1], v.data[2] }, .col = color });
+        }
+        
+        for (hull_faces) |face| {
+            try self.indices.append(self.allocator, base + face[0]);
+            try self.indices.append(self.allocator, base + face[1]);
+            try self.indices.append(self.allocator, base + face[2]);
+        }
+    }
+    
+    fn generateConvexHullFaces(self: *MeshBuilder, vertices: []Vec3) ![][3]u16 {
+        if (vertices.len < 4) return &[_][3]u16{};
+        
+        var faces = std.ArrayListUnmanaged([3]u16){};
+        
+        // Simple approach: test all triangles, keep those that are hull faces
+        for (0..vertices.len) |i| {
+            for (i + 1..vertices.len) |j| {
+                for (j + 1..vertices.len) |k| {
+                    const v0 = vertices[i];
+                    const v1 = vertices[j]; 
+                    const v2 = vertices[k];
+                    
+                    const edge1 = Vec3.sub(v1, v0);
+                    const edge2 = Vec3.sub(v2, v0);
+                    const normal = Vec3.cross(edge1, edge2);
+                    
+                    if (Vec3.length(normal) < math.EPSILON) continue;
+                    
+                    // Check if all other vertices are on one side of this triangle
+                    var is_hull_face = true;
+                    var side_sign: ?f32 = null;
+                    
+                    for (vertices, 0..) |test_vertex, idx| {
+                        if (idx == i or idx == j or idx == k) continue;
                         
-                        const edge1 = Vec3.sub(v1, v0);
-                        const edge2 = Vec3.sub(v2, v0);
-                        const normal = Vec3.cross(edge1, edge2);
-                        
-                        if (Vec3.length(normal) < math.EPSILON) continue;
-                        
-                        var is_hull_face = true;
-                        var side_sign: ?f32 = null;
-                        
-                        for (vertices, 0..) |test_vertex, idx| {
-                            if (idx == i or idx == j or idx == k) continue;
-                            
-                            const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
-                            if (@abs(dot) > math.EPSILON) {
-                                if (side_sign == null) {
-                                    side_sign = dot;
-                                } else if (side_sign.? * dot < 0) {
-                                    is_hull_face = false;
-                                    break;
-                                }
+                        const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
+                        if (@abs(dot) > math.EPSILON) {
+                            if (side_sign == null) {
+                                side_sign = dot;
+                            } else if (side_sign.? * dot < 0) {
+                                is_hull_face = false;
+                                break;
                             }
                         }
-                        
-                        if (is_hull_face) {
-                            if ((side_sign orelse 1) > 0) {
-                                try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
-                                try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
-                                try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
-                            } else {
-                                try self.indices.append(self.allocator, base + @as(u16, @intCast(i)));
-                                try self.indices.append(self.allocator, base + @as(u16, @intCast(j)));
-                                try self.indices.append(self.allocator, base + @as(u16, @intCast(k)));
-                            }
-                        }
+                    }
+                    
+                    if (is_hull_face) {
+                        const face: [3]u16 = if ((side_sign orelse 1) > 0) 
+                            .{ @intCast(i), @intCast(k), @intCast(j) }
+                        else 
+                            .{ @intCast(i), @intCast(j), @intCast(k) };
+                        try faces.append(self.allocator, face);
                     }
                 }
             }
         }
+        
+        return try faces.toOwnedSlice(self.allocator);
     }
 };
     
