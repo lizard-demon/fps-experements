@@ -6,9 +6,11 @@ const Vec3 = math.Vec3;
 const World = world.World;
 const HullType = world.HullType;
 const Collision = world.Collision;
-const EPSILON = math.EPSILON;
-const STEP_HEIGHT = math.STEP_HEIGHT;
-const GROUND_SNAP = math.GROUND_SNAP;
+// Global constants - single source of truth
+pub const EPSILON: f32 = 0.001;
+pub const STEP_HEIGHT: f32 = 0.25;
+pub const GROUND_SNAP: f32 = 0.05;
+pub const COLLISION_MARGIN: f32 = 0.02; // Small margin to prevent seam catching
 
 pub const Move = struct { pos: Vec3, collision: ?Collision = null };
 
@@ -44,8 +46,14 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
         const jump = i.keys.sp;
         const hull_type: HullType = if (p.crouching) .crouching else .standing;
         
-        // Gravity
-        p.vel.data[1] -= config.gravity * dt;
+        // Check ground status with slope angle limit (45 degrees = 0.707 dot product with up vector)
+        const ground_check = checkGround(collision_world, t.pos, hull_type);
+        p.on_ground = ground_check.is_ground;
+        
+        // Apply gravity only when not on valid ground (slopes steeper than 45° get gravity)
+        if (!p.on_ground) {
+            p.vel.data[1] -= config.gravity * dt;
+        }
         
         // Jump
         if (jump and p.on_ground) { 
@@ -83,11 +91,10 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
             }
         }
         
-        // Movement with step-up
+        // Movement
         const delta = Vec3.scale(p.vel, dt);
-        const move_result = moveWithStepUp(collision_world, t.pos, delta, hull_type);
+        const move_result = move(collision_world, t.pos, delta, hull_type);
         t.pos = move_result.pos;
-        p.on_ground = collision_world.check(Vec3.new(t.pos.data[0], t.pos.data[1] - GROUND_SNAP, t.pos.data[2]), hull_type) != null;
         
         // Simple collision response - only redirect when being pushed into surface
         if (move_result.collision) |collision| {
@@ -101,44 +108,22 @@ pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []I
     }
 }
 
-fn moveWithStepUp(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) Move {
-    // Try normal movement first
-    const normal_move = move(world_collision, start, delta, hull_type);
+const GroundCheck = struct {
+    is_ground: bool,
+    normal: ?Vec3 = null,
+};
+
+fn checkGround(world_collision: *const World, pos: Vec3, hull_type: HullType) GroundCheck {
+    const ground_test_pos = Vec3.new(pos.data[0], pos.data[1] - GROUND_SNAP, pos.data[2]);
     
-    // If we moved successfully or there's no horizontal movement, we're done
-    const horizontal_dist = @sqrt(delta.data[0] * delta.data[0] + delta.data[2] * delta.data[2]);
-    if (normal_move.collision == null or horizontal_dist < EPSILON) {
-        return normal_move;
+    if (world_collision.check(ground_test_pos, hull_type)) |collision| {
+        // Check if surface is walkable (less than 45 degrees from horizontal)
+        // cos(45°) = 0.707, so normal.y should be > 0.707 for walkable surface
+        const is_walkable = collision.normal.data[1] > 0.707;
+        return .{ .is_ground = is_walkable, .normal = collision.normal };
     }
     
-    // Try step-up movement
-    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
-    const step_start = Vec3.add(start, Vec3.new(0, STEP_HEIGHT, 0));
-    
-    // Check if we can fit at step height
-    if (world_collision.check(step_start, hull_type) != null) {
-        return normal_move; // Can't step up
-    }
-    
-    // Move horizontally at step height
-    const step_move = move(world_collision, step_start, horizontal, hull_type);
-    
-    // Drop down to find ground
-    const drop_start = Vec3.add(step_move.pos, Vec3.new(0, delta.data[1], 0));
-    const drop_delta = Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0);
-    const drop_result = traceMove(world_collision, drop_start, drop_delta, hull_type);
-    
-    // Use step-up result if we moved further horizontally
-    const normal_horizontal = @sqrt((normal_move.pos.data[0] - start.data[0]) * (normal_move.pos.data[0] - start.data[0]) + 
-                                   (normal_move.pos.data[2] - start.data[2]) * (normal_move.pos.data[2] - start.data[2]));
-    const step_horizontal = @sqrt((drop_result.end_pos.data[0] - start.data[0]) * (drop_result.end_pos.data[0] - start.data[0]) + 
-                                 (drop_result.end_pos.data[2] - start.data[2]) * (drop_result.end_pos.data[2] - start.data[2]));
-    
-    if (step_horizontal > normal_horizontal + EPSILON) {
-        return .{ .pos = drop_result.end_pos, .collision = normal_move.collision };
-    }
-    
-    return normal_move;
+    return .{ .is_ground = false };
 }
 
 pub fn move(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) Move {
@@ -151,42 +136,78 @@ fn slideMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_ty
     var pos = start;
     var vel = velocity;
     var first_collision: ?Collision = null;
+    var planes: [4]Vec3 = undefined; // Store collision planes to avoid oscillation
+    var num_planes: u32 = 0;
     
-    // Quake allows up to 4 bumps per move
-    for (0..4) |bump| {
+    // Try direct movement first
+    const direct_target = Vec3.add(pos, vel);
+    if (world_collision.check(direct_target, hull_type) == null) {
+        return .{ .pos = direct_target };
+    }
+    
+    // Try step-up for horizontal movement
+    const horizontal = Vec3.new(vel.data[0], 0, vel.data[2]);
+    if (Vec3.length(horizontal) >= EPSILON) {
+        const step_up = Vec3.add(Vec3.add(pos, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
+        if (world_collision.check(step_up, hull_type) == null) {
+            // Find ground and apply vertical movement
+            const drop_trace = traceMove(world_collision, step_up, Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0), hull_type);
+            const final_pos = Vec3.add(drop_trace.end_pos, Vec3.new(0, vel.data[1], 0));
+            if (world_collision.check(final_pos, hull_type) == null) {
+                return .{ .pos = final_pos };
+            } else {
+                return .{ .pos = drop_trace.end_pos };
+            }
+        }
+    }
+    
+    // Slide along surfaces (up to 3 bumps)
+    for (0..3) |bump| {
         if (Vec3.length(vel) < EPSILON) break;
         
-        const target = Vec3.add(pos, vel);
-        
-        // Check if we can move directly
-        if (world_collision.check(target, hull_type) == null) {
-            pos = target;
-            break;
-        }
-        
-        // Find collision point using binary search
         const trace = traceMove(world_collision, pos, vel, hull_type);
         pos = trace.end_pos;
         
         if (trace.collision) |collision| {
             if (first_collision == null) first_collision = collision;
             
-            // Remove velocity component into the surface
             const into_surface = Vec3.dot(vel, collision.normal);
-            if (into_surface >= 0) break; // Moving away from surface
+            if (into_surface >= 0) break;
             
-            vel = Vec3.sub(vel, Vec3.scale(collision.normal, into_surface));
-            
-            // If this is our second+ bump, check for corner case
-            if (bump > 0) {
-                // Reduce velocity to prevent infinite bouncing
-                vel = Vec3.scale(vel, 0.95);
-                
-                // Stop if velocity becomes too small
-                if (Vec3.length(vel) < EPSILON * 10) break;
+            // Store this plane to prevent oscillation
+            if (num_planes < planes.len) {
+                planes[num_planes] = collision.normal;
+                num_planes += 1;
             }
+            
+            // Check if we're hitting a plane we've already hit (oscillation detection)
+            var is_oscillating = false;
+            if (num_planes > 1) {
+                for (planes[0..num_planes-1]) |plane| {
+                    if (Vec3.dot(collision.normal, plane) > 0.99) { // Nearly same plane
+                        is_oscillating = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (is_oscillating) {
+                // Stop movement to prevent oscillation
+                break;
+            }
+            
+            // Clip velocity against all planes we've hit
+            var clipped_vel = vel;
+            for (planes[0..num_planes]) |plane| {
+                const dot = Vec3.dot(clipped_vel, plane);
+                if (dot < 0) {
+                    clipped_vel = Vec3.sub(clipped_vel, Vec3.scale(plane, dot));
+                }
+            }
+            
+            vel = clipped_vel;
+            if (bump > 0) vel = Vec3.scale(vel, 0.95); // Reduce bouncing
         } else {
-            // No collision found but we couldn't move - shouldn't happen
             break;
         }
     }
@@ -221,9 +242,12 @@ fn traceMove(world_collision: *const World, start: Vec3, delta: Vec3, hull_type:
         }
     }
     
-    // Move slightly away from the surface to prevent getting stuck
+    // Apply collision margin to prevent seam catching
     if (collision != null and best_fraction > 0) {
-        best_fraction = @max(0, best_fraction - EPSILON);
+        // Calculate margin based on movement direction
+        const move_length = Vec3.length(delta);
+        const margin_fraction = if (move_length > 0) COLLISION_MARGIN / move_length else 0;
+        best_fraction = @max(0, best_fraction - margin_fraction);
     }
     
     const final_pos = Vec3.add(start, Vec3.scale(delta, best_fraction));
