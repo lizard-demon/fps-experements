@@ -80,10 +80,6 @@ pub const AABB = struct {
                 self.min.data[2] <= other.max.data[2] and self.max.data[2] >= other.min.data[2]);
     }
     
-    pub fn hit(self: AABB, other: AABB) bool {
-        return self.intersects(other);
-    }
-    
     pub fn union_with(self: AABB, other: AABB) AABB {
         return .{ .min = Vec3.min(self.min, other.min), .max = Vec3.max(self.max, other.max) };
     }

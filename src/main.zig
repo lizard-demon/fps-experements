@@ -52,96 +52,122 @@ const GameResources = struct {
         self.allocator = allocator;
         self.mesh_builder = world.MeshBuilder.init(allocator);
         
-        // Simplified demo world for debugging
         var plane_idx: usize = 0;
         var brush_idx: usize = 0;
         
-        // 1. Ground platform (large base)
-        self.brush_planes[plane_idx + 0] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -15 };  // Right
-        self.brush_planes[plane_idx + 1] = .{ .normal = Vec3.new(-1,  0,  0), .distance = -15 };  // Left
-        self.brush_planes[plane_idx + 2] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -0.5 }; // Top
-        self.brush_planes[plane_idx + 3] = .{ .normal = Vec3.new( 0, -1,  0), .distance = -2 };   // Bottom
-        self.brush_planes[plane_idx + 4] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -15 };  // Front
-        self.brush_planes[plane_idx + 5] = .{ .normal = Vec3.new( 0,  0, -1), .distance = -15 };  // Back
-        self.brushes[brush_idx] = .{ .planes = self.brush_planes[plane_idx..plane_idx+6], .bounds = AABB.new(Vec3.new(-15, -2, -15), Vec3.new(15, 0.5, 15)) };
-        plane_idx += 6; brush_idx += 1;
+        // 1. Massive ground platform
+        brush_idx += self.addBoxBrush(&plane_idx, Vec3.new(0, -2.25, 0), Vec3.new(100, 4.5, 100), brush_idx);
         
-        // 2. Simple test box
-        const box_center = Vec3.new(5, 1, 0);
-        const box_size = Vec3.new(2, 2, 2);
-        self.brush_planes[plane_idx + 0] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -(box_center.data[0] + box_size.data[0]/2) };
-        self.brush_planes[plane_idx + 1] = .{ .normal = Vec3.new(-1,  0,  0), .distance = box_center.data[0] - box_size.data[0]/2 };
-        self.brush_planes[plane_idx + 2] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -(box_center.data[1] + box_size.data[1]/2) };
-        self.brush_planes[plane_idx + 3] = .{ .normal = Vec3.new( 0, -1,  0), .distance = box_center.data[1] - box_size.data[1]/2 };
-        self.brush_planes[plane_idx + 4] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -(box_center.data[2] + box_size.data[2]/2) };
-        self.brush_planes[plane_idx + 5] = .{ .normal = Vec3.new( 0,  0, -1), .distance = box_center.data[2] - box_size.data[2]/2 };
-        self.brushes[brush_idx] = .{ .planes = self.brush_planes[plane_idx..plane_idx+6], .bounds = AABB.new(Vec3.sub(box_center, Vec3.scale(box_size, 0.5)), Vec3.add(box_center, Vec3.scale(box_size, 0.5))) };
-        plane_idx += 6; brush_idx += 1;
+        // 2. Massive slope/mountain
+        brush_idx += self.addSlopeBrush(&plane_idx, brush_idx);
         
-        // 3. Simple ramp (wedge)
-        const ramp_center = Vec3.new(-5, 1, 0);
-        self.brush_planes[plane_idx + 0] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 0.5 };   // Bottom (on ground)
-        self.brush_planes[plane_idx + 1] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -(ramp_center.data[0] + 1) };  // Right
-        self.brush_planes[plane_idx + 2] = .{ .normal = Vec3.new(-1,  0,  0), .distance = ramp_center.data[0] - 1 };     // Left
-        self.brush_planes[plane_idx + 3] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -(ramp_center.data[2] + 1) };  // Front
-        self.brush_planes[plane_idx + 4] = .{ .normal = Vec3.new( 0,  0, -1), .distance = ramp_center.data[2] - 1 };     // Back
-        // Fixed sloped plane: goes from high on left to low on right
-        const slope_normal = Vec3.normalize(Vec3.new(1, 1, 0));  // 45 degree slope
-        const slope_point = Vec3.new(-6, 2.5, 0);  // High point on left side
-        self.brush_planes[plane_idx + 5] = .{ .normal = slope_normal, .distance = -Vec3.dot(slope_normal, slope_point) };
-        self.brushes[brush_idx] = .{ .planes = self.brush_planes[plane_idx..plane_idx+6], .bounds = AABB.new(Vec3.new(ramp_center.data[0] - 1, 0.5, ramp_center.data[2] - 1), Vec3.new(ramp_center.data[0] + 1, 2.5, ramp_center.data[2] + 1)) };
-        plane_idx += 6; brush_idx += 1;
-        
-        // Add more test brushes to see SAH splitting in action
-        var test_brush_idx: u32 = 0;
-        while (test_brush_idx < 10 and brush_idx < self.brushes.len and plane_idx + 6 <= self.brush_planes.len) : (test_brush_idx += 1) {
-            const x = @as(f32, @floatFromInt(test_brush_idx)) * 3.0 - 15.0;
-            const z = if (test_brush_idx % 2 == 0) @as(f32, 5.0) else @as(f32, -5.0);
-            
-            // Create a small box at position (x, 1, z)
-            self.brush_planes[plane_idx + 0] = .{ .normal = Vec3.new( 1,  0,  0), .distance = -(x + 0.5) };
-            self.brush_planes[plane_idx + 1] = .{ .normal = Vec3.new(-1,  0,  0), .distance = x - 0.5 };
-            self.brush_planes[plane_idx + 2] = .{ .normal = Vec3.new( 0,  1,  0), .distance = -2.0 };
-            self.brush_planes[plane_idx + 3] = .{ .normal = Vec3.new( 0, -1,  0), .distance = 1.0 };
-            self.brush_planes[plane_idx + 4] = .{ .normal = Vec3.new( 0,  0,  1), .distance = -(z + 0.5) };
-            self.brush_planes[plane_idx + 5] = .{ .normal = Vec3.new( 0,  0, -1), .distance = z - 0.5 };
-            
-            self.brushes[brush_idx] = .{ 
-                .planes = self.brush_planes[plane_idx..plane_idx+6], 
-                .bounds = AABB.new(Vec3.new(x - 0.5, 1.0, z - 0.5), Vec3.new(x + 0.5, 2.0, z + 0.5)) 
-            };
-            plane_idx += 6; 
-            brush_idx += 1;
-        }
-        
-        // Initialize world with all brushes using new expanded geometry system
-        self.world = world.World.init(self.brushes[0..brush_idx], allocator) catch |err| {
-            std.log.err("Failed to initialize world: {}", .{err});
-            // Create a minimal fallback world - this won't work but prevents crash
-            return; // Early return on world init failure
+        // 3. Scattered structures
+        const structures = [_]struct { pos: Vec3, size: Vec3 }{
+            .{ .pos = Vec3.new(25, 3, 0), .size = Vec3.new(4, 6, 4) },
+            .{ .pos = Vec3.new(-25, 2, 15), .size = Vec3.new(6, 4, 6) },
+            .{ .pos = Vec3.new(0, 1, -30), .size = Vec3.new(8, 2, 3) },
+            .{ .pos = Vec3.new(-15, 4, -15), .size = Vec3.new(3, 8, 3) },
+            .{ .pos = Vec3.new(30, 1.5, 25), .size = Vec3.new(5, 3, 5) },
         };
         
-        // Debug: Print brush information
-        std.log.info("Created {} brushes:", .{brush_idx});
-        for (self.brushes[0..brush_idx], 0..) |brush, i| {
+        for (structures) |structure| {
+            if (brush_idx >= self.brushes.len) break;
+            brush_idx += self.addBoxBrush(&plane_idx, structure.pos, structure.size, brush_idx);
+        }
+        
+        self.initializeWorld(brush_idx);
+        self.initializeRendering();
+    }
+    
+    fn addBoxBrush(self: *@This(), plane_idx: *usize, center: Vec3, size: Vec3, brush_idx: usize) u32 {
+        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
+        
+        const half_size = Vec3.scale(size, 0.5);
+        const planes = [6]world.Plane{
+            .{ .normal = Vec3.new( 1,  0,  0), .distance = -(center.data[0] + half_size.data[0]) },
+            .{ .normal = Vec3.new(-1,  0,  0), .distance = center.data[0] - half_size.data[0] },
+            .{ .normal = Vec3.new( 0,  1,  0), .distance = -(center.data[1] + half_size.data[1]) },
+            .{ .normal = Vec3.new( 0, -1,  0), .distance = center.data[1] - half_size.data[1] },
+            .{ .normal = Vec3.new( 0,  0,  1), .distance = -(center.data[2] + half_size.data[2]) },
+            .{ .normal = Vec3.new( 0,  0, -1), .distance = center.data[2] - half_size.data[2] },
+        };
+        
+        @memcpy(self.brush_planes[plane_idx.*..plane_idx.* + 6], &planes);
+        self.brushes[brush_idx] = .{ 
+            .planes = self.brush_planes[plane_idx.*..plane_idx.* + 6], 
+            .bounds = AABB.new(Vec3.sub(center, half_size), Vec3.add(center, half_size))
+        };
+        plane_idx.* += 6;
+        return 1;
+    }
+    
+    fn addSlopeBrush(self: *@This(), plane_idx: *usize, brush_idx: usize) u32 {
+        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
+        
+        const slope_width = 30.0;
+        const slope_height = 20.0;
+        const slope_center = Vec3.new(0, 0, 20);
+        const slope_angle = std.math.pi / 6.0; // 30 degrees
+        
+        const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
+        const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
+        
+        const planes = [6]world.Plane{
+            .{ .normal = Vec3.new( 0, -1,  0), .distance = 0.5 },
+            .{ .normal = Vec3.new(-1,  0,  0), .distance = -slope_width/2 },
+            .{ .normal = Vec3.new( 1,  0,  0), .distance = -slope_width/2 },
+            .{ .normal = Vec3.new( 0,  0, -1), .distance = slope_center.data[2] - slope_width/2 },
+            .{ .normal = Vec3.new( 0,  0,  1), .distance = -(slope_center.data[2] + slope_width/2) },
+            .{ .normal = slope_normal, .distance = -Vec3.dot(slope_normal, slope_point) },
+        };
+        
+        @memcpy(self.brush_planes[plane_idx.*..plane_idx.* + 6], &planes);
+        self.brushes[brush_idx] = .{ 
+            .planes = self.brush_planes[plane_idx.*..plane_idx.* + 6], 
+            .bounds = AABB.new(
+                Vec3.new(-slope_width/2, 0.5, slope_center.data[2] - slope_width/2), 
+                Vec3.new(slope_width/2, slope_height, slope_center.data[2] + slope_width/2)
+            )
+        };
+        plane_idx.* += 6;
+        return 1;
+    }
+    
+    fn initializeWorld(self: *@This(), brush_count: usize) void {
+        self.world = world.World.init(self.brushes[0..brush_count], self.allocator) catch |err| {
+            std.log.err("Failed to initialize world: {}", .{err});
+            return;
+        };
+        
+        std.log.info("Created {} brushes", .{brush_count});
+        for (self.brushes[0..brush_count], 0..) |brush, i| {
             std.log.info("  Brush {}: {} planes, bounds: ({d:.1},{d:.1},{d:.1}) to ({d:.1},{d:.1},{d:.1})", .{
                 i, brush.planes.len,
                 brush.bounds.min.data[0], brush.bounds.min.data[1], brush.bounds.min.data[2],
                 brush.bounds.max.data[0], brush.bounds.max.data[1], brush.bounds.max.data[2]
             });
         }
-        
-        // Init rendering
+    }
+    
+    fn initializeRendering(self: *@This()) void {
         var layout = sg.VertexLayoutState{};
         layout.attrs[0].format = .FLOAT3;
         layout.attrs[1].format = .FLOAT4;
+        
         self.pipeline = sg.makePipeline(.{ 
             .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), 
-            .layout = layout, .index_type = .UINT16, 
+            .layout = layout, 
+            .index_type = .UINT16, 
             .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, 
             .cull_mode = .NONE 
         });
-        self.pass_action = .{ .colors = .{ .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, .{}, .{}, .{}, .{}, .{}, .{}, .{} } };
+        
+        self.pass_action = .{ 
+            .colors = .{ 
+                .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, 
+                .{}, .{}, .{}, .{}, .{}, .{}, .{} 
+            } 
+        };
     }
     
     fn deinit(self: *@This()) void {
@@ -161,7 +187,7 @@ const GameResources = struct {
     }
     
     fn render(self: *const @This(), view: Mat4) void {
-        const mvp = Mat4.mul(math.perspective(90, 1.33, 0.1, 200), view);
+        const mvp = Mat4.mul(math.perspective(90, 1.33, 0.1, 500), view); // Increased far plane to 500
         sg.beginPass(.{ .action = self.pass_action, .swapchain = sokol.glue.swapchain() });
         sg.applyPipeline(self.pipeline);
         sg.applyBindings(self.bindings);
@@ -170,12 +196,18 @@ const GameResources = struct {
     }
 };
 
+// Configuration constants
+const MOUSE_SENSITIVITY: f32 = 0.002;
+const PITCH_LIMIT: f32 = 1.5;
+const EYE_HEIGHT: f32 = 0.6;
+const CROSSHAIR_SIZE: f32 = 8.0;
+
 // Systems
 fn sys_input(inputs: []Input, resources: *GameResources) void {
     _ = resources;
     for (inputs) |*i| {
-        i.yaw += i.mdx * 0.002;
-        i.pitch = std.math.clamp(i.pitch + i.mdy * 0.002, -1.5, 1.5);
+        i.yaw += i.mdx * MOUSE_SENSITIVITY;
+        i.pitch = std.math.clamp(i.pitch + i.mdy * MOUSE_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
         i.mdx = 0; i.mdy = 0;
     }
 }
@@ -186,10 +218,18 @@ fn sys_physics(transforms: []Transform, physics_comps: []Physics, inputs: []Inpu
 
 fn sys_render(transforms: []Transform, inputs: []Input, resources: *GameResources) void {
     for (transforms, inputs) |t, i| {
-        const eye = Vec3.add(t.pos, Vec3.new(0, 0.6, 0));
+        const eye = Vec3.add(t.pos, Vec3.new(0, EYE_HEIGHT, 0));
         const cy, const sy = .{ @cos(i.yaw), @sin(i.yaw) };
         const cp, const sp = .{ @cos(i.pitch), @sin(i.pitch) };
-        const view = Mat4{ .data = .{ cy, sy*sp, -sy*cp, 0, 0, cp, sp, 0, sy, -cy*sp, cy*cp, 0, -eye.data[0]*cy - eye.data[2]*sy, -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 1 } };
+        const view = Mat4{ .data = .{ 
+            cy, sy*sp, -sy*cp, 0, 
+            0, cp, sp, 0, 
+            sy, -cy*sp, cy*cp, 0, 
+            -eye.data[0]*cy - eye.data[2]*sy, 
+            -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, 
+            eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 
+            1 
+        }};
         resources.render(view);
         break;
     }
@@ -217,9 +257,9 @@ export fn init() void {
         std.log.err("Failed to build mesh: {}", .{err});
     };
     
-    // Create player
+    // Create player - spawn at origin on the large ground plane
     store.resources.player_entity = store.create(Player, allocator, .{
-        .transform = .{ .pos = Vec3.new(0, 2, 0) },
+        .transform = .{ .pos = Vec3.new(0, 3, -20) }, // Start further back to see the slope
         .physics = .{}, .input = .{}, .audio = .{},
     }) catch |err| {
         std.log.err("Failed to create player entity: {}", .{err});
@@ -240,8 +280,8 @@ export fn frame() void {
     const cx = @as(f32, @floatFromInt(sapp.width())) * 0.5;
     const cy = @as(f32, @floatFromInt(sapp.height())) * 0.5;
     const dl = ig.igGetBackgroundDrawList();
-    ig.ImDrawList_AddLine(dl, .{ .x = cx - 8, .y = cy }, .{ .x = cx + 8, .y = cy }, 0xFF00FF00);
-    ig.ImDrawList_AddLine(dl, .{ .x = cx, .y = cy - 8 }, .{ .x = cx, .y = cy + 8 }, 0xFF00FF00);
+    ig.ImDrawList_AddLine(dl, .{ .x = cx - CROSSHAIR_SIZE, .y = cy }, .{ .x = cx + CROSSHAIR_SIZE, .y = cy }, 0xFF00FF00);
+    ig.ImDrawList_AddLine(dl, .{ .x = cx, .y = cy - CROSSHAIR_SIZE }, .{ .x = cx, .y = cy + CROSSHAIR_SIZE }, 0xFF00FF00);
     
     simgui.render(); sg.endPass(); sg.commit();
 }

@@ -64,26 +64,42 @@ const Node = packed struct {
 };
 
 const BVH = struct {
-    brushes: []const Brush, nodes: []Node, indices: []u32, allocator: std.mem.Allocator,
+    brushes: []const Brush, 
+    nodes: std.ArrayListUnmanaged(Node),
+    indices: std.ArrayListUnmanaged(u32), 
+    allocator: std.mem.Allocator,
     
     fn init(brushes: []const Brush, allocator: std.mem.Allocator) !BVH {
-        if (brushes.len == 0) return .{ .brushes = brushes, .nodes = &[_]Node{}, .indices = &[_]u32{}, .allocator = allocator };
+        if (brushes.len == 0) return .{ 
+            .brushes = brushes, 
+            .nodes = .{}, 
+            .indices = .{}, 
+            .allocator = allocator 
+        };
         
-        const indices = try allocator.alloc(u32, brushes.len);
-        for (indices, 0..) |*idx, i| idx.* = @intCast(i);
+        var indices = std.ArrayListUnmanaged(u32){};
+        try indices.ensureTotalCapacity(allocator, brushes.len);
+        for (0..brushes.len) |i| {
+            indices.appendAssumeCapacity(@intCast(i));
+        }
         
-        var bvh = BVH{ .brushes = brushes, .nodes = undefined, .indices = indices, .allocator = allocator };
-        bvh.nodes = try bvh.build();
+        var bvh = BVH{ 
+            .brushes = brushes, 
+            .nodes = .{}, 
+            .indices = indices, 
+            .allocator = allocator 
+        };
+        _ = try bvh.build();
         return bvh;
     }
     
     fn deinit(self: *BVH) void {
-        self.allocator.free(self.nodes);
-        self.allocator.free(self.indices);
+        self.nodes.deinit(self.allocator);
+        self.indices.deinit(self.allocator);
     }
     
     fn checkCapsule(self: *const BVH, capsule: Capsule) ?Collision {
-        if (self.nodes.len == 0) {
+        if (self.nodes.items.len == 0) {
             for (self.brushes) |brush| if (brush.checkCapsule(capsule)) |collision| return collision;
             return null;
         }
@@ -96,26 +112,45 @@ const BVH = struct {
         var best_collision: ?Collision = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        var node_idx: u32 = 0;
-        while (node_idx < self.nodes.len) {
-            const node = self.nodes[node_idx];
-            if (!node.bounds().intersects(capsule_bounds)) { 
-                node_idx += 1; 
-                continue; 
-            }
+        // Use stack-based traversal
+        var stack: [64]u32 = undefined;
+        var stack_size: u32 = 1;
+        stack[0] = 0;
+        
+        while (stack_size > 0) {
+            stack_size -= 1;
+            const node_idx = stack[stack_size];
+            
+            if (node_idx >= self.nodes.items.len) continue;
+            const node = self.nodes.items[node_idx];
+            
+            if (!node.bounds().intersects(capsule_bounds)) continue;
             
             if (node.isLeaf()) {
                 for (node.first..node.first + node.count) |i| {
-                    if (self.brushes[self.indices[i]].checkCapsule(capsule)) |collision| {
+                    if (i >= self.indices.items.len) continue;
+                    if (self.brushes[self.indices.items[i]].checkCapsule(capsule)) |collision| {
                         if (collision.distance > best_distance) {
                             best_distance = collision.distance;
                             best_collision = collision;
                         }
                     }
                 }
-                node_idx += 1;
             } else {
-                node_idx = node.left();
+                // Add both children to stack
+                const left_child = node.left();
+                const right_child = left_child + 1;
+                
+                if (stack_size + 2 <= stack.len) {
+                    if (right_child < self.nodes.items.len) {
+                        stack[stack_size] = right_child;
+                        stack_size += 1;
+                    }
+                    if (left_child < self.nodes.items.len) {
+                        stack[stack_size] = left_child;
+                        stack_size += 1;
+                    }
+                }
             }
         }
         return best_collision;
@@ -130,8 +165,8 @@ const BVH = struct {
     
     fn buildRecursive(self: *BVH, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node)) !u32 {
         const node_idx = @as(u32, @intCast(nodes.items.len));
-        var bounds = self.brushes[self.indices[start]].bounds;
-        for (start + 1..start + count) |i| bounds = bounds.union_with(self.brushes[self.indices[i]].bounds);
+        var bounds = self.brushes[self.indices.items[start]].bounds;
+        for (start + 1..start + count) |i| bounds = bounds.union_with(self.brushes[self.indices.items[i]].bounds);
         
         try nodes.append(self.allocator, Node{
             .min_x = bounds.min.data[0], .min_y = bounds.min.data[1], .min_z = bounds.min.data[2],
@@ -167,7 +202,7 @@ const BVH = struct {
         
         for (0..3) |axis| {
             for (start..start + count) |i| {
-                const brush_bounds = self.brushes[self.indices[i]].bounds;
+                const brush_bounds = self.brushes[self.indices.items[i]].bounds;
                 const split_pos = (brush_bounds.min.data[axis] + brush_bounds.max.data[axis]) * 0.5;
                 
                 var left_bounds: ?AABB = null;
@@ -176,7 +211,7 @@ const BVH = struct {
                 var right_count: u32 = 0;
                 
                 for (start..start + count) |j| {
-                    const prim_bounds = self.brushes[self.indices[j]].bounds;
+                    const prim_bounds = self.brushes[self.indices.items[j]].bounds;
                     const centroid = (prim_bounds.min.data[axis] + prim_bounds.max.data[axis]) * 0.5;
                     
                     if (centroid < split_pos) {
@@ -206,13 +241,13 @@ const BVH = struct {
         var left = start;
         var right = start + count - 1;
         while (left <= right) {
-            const centroid = (self.brushes[self.indices[left]].bounds.min.data[axis] + self.brushes[self.indices[left]].bounds.max.data[axis]) * 0.5;
+            const centroid = (self.brushes[self.indices.items[left]].bounds.min.data[axis] + self.brushes[self.indices.items[left]].bounds.max.data[axis]) * 0.5;
             if (centroid < split_pos) {
                 left += 1;
             } else {
-                const temp = self.indices[left];
-                self.indices[left] = self.indices[right];
-                self.indices[right] = temp;
+                const temp = self.indices.items[left];
+                self.indices.items[left] = self.indices.items[right];
+                self.indices.items[right] = temp;
                 if (right == 0) break;
                 right -= 1;
             }
