@@ -7,62 +7,41 @@ pub const HullType = enum { point, standing, crouching };
 pub const Collision = struct { normal: Vec3, distance: f32 };
 
 pub const Capsule = struct {
-    start: Vec3,
-    end: Vec3, 
-    radius: f32,
+    start: Vec3, end: Vec3, radius: f32,
     
-    pub fn fromHull(center: Vec3, hull_type: HullType) Capsule {
+    pub fn fromHull(pos: Vec3, hull_type: HullType) Capsule {
         return switch (hull_type) {
-            .point => .{ .start = center, .end = center, .radius = 0.0 },
-            .standing => .{ .start = Vec3.add(center, Vec3.new(0, -0.7, 0)), .end = Vec3.add(center, Vec3.new(0, 0.7, 0)), .radius = 0.3 },
-            .crouching => .{ .start = Vec3.add(center, Vec3.new(0, -0.4, 0)), .end = Vec3.add(center, Vec3.new(0, 0.4, 0)), .radius = 0.3 },
+            .point => .{ .start = pos, .end = pos, .radius = 0.0 },
+            .standing => .{ .start = Vec3.add(pos, Vec3.new(0, -0.7, 0)), .end = Vec3.add(pos, Vec3.new(0, 0.7, 0)), .radius = 0.3 },
+            .crouching => .{ .start = Vec3.add(pos, Vec3.new(0, -0.4, 0)), .end = Vec3.add(pos, Vec3.new(0, 0.4, 0)), .radius = 0.3 },
         };
+    }
+    
+    fn center(self: Capsule) Vec3 {
+        return Vec3.scale(Vec3.add(self.start, self.end), 0.5);
     }
 };
 
 pub const Plane = struct {
     normal: Vec3, distance: f32,
-    fn distanceToPoint(self: Plane, point: Vec3) f32 { return Vec3.dot(self.normal, point) + self.distance; }
+    
+    fn distanceToPoint(self: Plane, point: Vec3) f32 { 
+        return Vec3.dot(self.normal, point) + self.distance; 
+    }
 };
 
 pub const Brush = struct {
-    planes: []const Plane, 
-    bounds: AABB,
+    planes: []const Plane, bounds: AABB,
     
     fn checkCapsule(self: Brush, capsule: Capsule) ?Collision {
-        // Treat capsule as a point at its center, but expand all plane distances by radius
-        const center = Vec3.scale(Vec3.add(capsule.start, capsule.end), 0.5);
-        
         var closest_normal: ?Vec3 = null;
         var closest_distance: f32 = std.math.floatMax(f32);
         
         for (self.planes) |plane| {
-            // Distance from center to plane, minus radius (this simulates expanded geometry)
-            const distance = plane.distanceToPoint(center) - capsule.radius;
-            if (distance > math.EPSILON) return null; // Outside this plane
-            
+            const distance = plane.distanceToPoint(capsule.center()) - capsule.radius;
+            if (distance > math.EPSILON) return null;
             if (distance > -closest_distance) {
                 closest_distance = -distance;
-                closest_normal = plane.normal;
-            }
-        }
-        
-        return if (closest_normal) |normal| 
-            Collision{ .normal = normal, .distance = closest_distance } 
-        else null;
-    }
-    
-    fn checkSphere(self: Brush, center: Vec3, radius: f32) ?Collision {
-        var closest_normal: ?Vec3 = null;
-        var closest_distance: f32 = -std.math.floatMax(f32);
-        
-        for (self.planes) |plane| {
-            const distance = plane.distanceToPoint(center);
-            if (distance > radius + math.EPSILON) return null; // Outside this plane
-            
-            const penetration = radius - distance;
-            if (penetration > closest_distance) {
-                closest_distance = penetration;
                 closest_normal = plane.normal;
             }
         }
@@ -77,40 +56,38 @@ const Node = packed struct {
     min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32,
     first: u32, count: u30, axis: u2,
     
-    fn bounds(self: Node) AABB { return AABB{ .min = Vec3.new(self.min_x, self.min_y, self.min_z), .max = Vec3.new(self.max_x, self.max_y, self.max_z) }; }
+    fn bounds(self: Node) AABB { 
+        return AABB{ .min = Vec3.new(self.min_x, self.min_y, self.min_z), .max = Vec3.new(self.max_x, self.max_y, self.max_z) }; 
+    }
     fn isLeaf(self: Node) bool { return self.axis == 3; }
     fn left(self: Node) u32 { return self.first; }
 };
 
-const CollisionWorld = struct {
-    brushes: []const Brush, 
-    nodes: []Node, 
-    indices: []u32, 
-    allocator: std.mem.Allocator,
+const BVH = struct {
+    brushes: []const Brush, nodes: []Node, indices: []u32, allocator: std.mem.Allocator,
     
-    fn init(brushes: []const Brush, allocator: std.mem.Allocator) !CollisionWorld {
+    fn init(brushes: []const Brush, allocator: std.mem.Allocator) !BVH {
         if (brushes.len == 0) return .{ .brushes = brushes, .nodes = &[_]Node{}, .indices = &[_]u32{}, .allocator = allocator };
         
         const indices = try allocator.alloc(u32, brushes.len);
         for (indices, 0..) |*idx, i| idx.* = @intCast(i);
         
-        var world = CollisionWorld{ .brushes = brushes, .nodes = undefined, .indices = indices, .allocator = allocator };
-        world.nodes = try world.buildBVH();
-        return world;
+        var bvh = BVH{ .brushes = brushes, .nodes = undefined, .indices = indices, .allocator = allocator };
+        bvh.nodes = try bvh.build();
+        return bvh;
     }
     
-    fn deinit(self: *CollisionWorld) void {
+    fn deinit(self: *BVH) void {
         self.allocator.free(self.nodes);
         self.allocator.free(self.indices);
     }
     
-    fn checkCapsule(self: *const CollisionWorld, capsule: Capsule) ?Collision {
+    fn checkCapsule(self: *const BVH, capsule: Capsule) ?Collision {
         if (self.nodes.len == 0) {
             for (self.brushes) |brush| if (brush.checkCapsule(capsule)) |collision| return collision;
             return null;
         }
         
-        // Expand capsule bounds for BVH traversal
         const capsule_bounds = AABB{
             .min = Vec3.sub(Vec3.min(capsule.start, capsule.end), Vec3.new(capsule.radius, capsule.radius, capsule.radius)),
             .max = Vec3.add(Vec3.max(capsule.start, capsule.end), Vec3.new(capsule.radius, capsule.radius, capsule.radius)),
@@ -144,19 +121,14 @@ const CollisionWorld = struct {
         return best_collision;
     }
     
-    fn check(self: *const CollisionWorld, point: Vec3) ?Collision {
-        const capsule = Capsule{ .start = point, .end = point, .radius = 0.0 };
-        return self.checkCapsule(capsule);
-    }
-    
-    fn buildBVH(self: *CollisionWorld) ![]Node {
+    fn build(self: *BVH) ![]Node {
         var nodes = std.ArrayListUnmanaged(Node){};
         defer nodes.deinit(self.allocator);
         _ = try self.buildRecursive(0, @intCast(self.brushes.len), &nodes);
         return try self.layoutBreadthFirst(nodes.items);
     }
     
-    fn buildRecursive(self: *CollisionWorld, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node)) !u32 {
+    fn buildRecursive(self: *BVH, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node)) !u32 {
         const node_idx = @as(u32, @intCast(nodes.items.len));
         var bounds = self.brushes[self.indices[start]].bounds;
         for (start + 1..start + count) |i| bounds = bounds.union_with(self.brushes[self.indices[i]].bounds);
@@ -186,10 +158,10 @@ const CollisionWorld = struct {
         return node_idx;
     }
     
-    const SplitResult = struct { axis: u32, pos: f32, cost: f32 };
+    const Split = struct { axis: u32, pos: f32, cost: f32 };
     
-    fn findBestSplit(self: *CollisionWorld, start: u32, count: u32, bounds: AABB) SplitResult {
-        var best = SplitResult{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
+    fn findBestSplit(self: *BVH, start: u32, count: u32, bounds: AABB) Split {
+        var best = Split{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
         const parent_area = bounds.surface_area();
         if (parent_area <= 0) return best;
         
@@ -230,7 +202,7 @@ const CollisionWorld = struct {
         return best;
     }
     
-    fn partition(self: *CollisionWorld, start: u32, count: u32, axis: u32, split_pos: f32) u32 {
+    fn partition(self: *BVH, start: u32, count: u32, axis: u32, split_pos: f32) u32 {
         var left = start;
         var right = start + count - 1;
         while (left <= right) {
@@ -248,7 +220,7 @@ const CollisionWorld = struct {
         return left;
     }
     
-    fn layoutBreadthFirst(self: *CollisionWorld, tree_nodes: []Node) ![]Node {
+    fn layoutBreadthFirst(self: *BVH, tree_nodes: []Node) ![]Node {
         if (tree_nodes.len == 0) return try self.allocator.alloc(Node, 0);
         const nodes = try self.allocator.alloc(Node, tree_nodes.len);
         var queue: [256]u32 = undefined;
@@ -279,29 +251,27 @@ const CollisionWorld = struct {
 };
 
 pub const World = struct {
-    collision_world: CollisionWorld,
+    bvh: BVH,
     original_brushes: []const Brush,
-    allocator: std.mem.Allocator,
     
     pub fn init(brushes: []const Brush, allocator: std.mem.Allocator) !World {
         return World{
             .original_brushes = brushes,
-            .collision_world = try CollisionWorld.init(brushes, allocator),
-            .allocator = allocator,
+            .bvh = try BVH.init(brushes, allocator),
         };
     }
     
     pub fn deinit(self: *World) void {
-        self.collision_world.deinit();
+        self.bvh.deinit();
     }
     
     pub fn check(self: *const World, point: Vec3, hull_type: HullType) ?Collision {
         const capsule = Capsule.fromHull(point, hull_type);
-        return self.collision_world.checkCapsule(capsule);
+        return self.bvh.checkCapsule(capsule);
     }
     
     pub fn checkCapsule(self: *const World, capsule: Capsule) ?Collision {
-        return self.collision_world.checkCapsule(capsule);
+        return self.bvh.checkCapsule(capsule);
     }
 };
 

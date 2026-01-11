@@ -32,20 +32,13 @@ pub const Input = struct {
 };
 pub const Audio = struct { timer: f32 = 0, active: bool = false };
 
-const default_config = Config{};
-
 pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, collision_world: *const World, dt: f32) void {
-    updateWithConfig(transforms, physics, inputs, audios, collision_world, dt, default_config);
-}
-
-pub fn updateWithConfig(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, collision_world: *const World, dt: f32, config: Config) void {
+    const config = Config{};
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
         const hull_type: HullType = if (p.crouching) .crouching else .standing;
         
-        // Ground check with slope limit
+        // Ground check and physics
         p.on_ground = isOnGround(collision_world, t.pos, hull_type);
-        
-        // Physics
         if (!p.on_ground) p.vel.data[1] -= config.gravity * dt;
         if (i.keys.sp and p.on_ground) { 
             p.vel.data[1] = config.jump_velocity; 
@@ -116,22 +109,62 @@ fn isOnGround(world_collision: *const World, pos: Vec3, hull_type: HullType) boo
 pub fn move(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) Move {
     if (Vec3.length(delta) < EPSILON) return .{ .pos = start };
     
-    // Try direct movement first
+    // Try direct movement
     const end_capsule = world.Capsule.fromHull(Vec3.add(start, delta), hull_type);
     if (world_collision.checkCapsule(end_capsule) == null) {
         return .{ .pos = Vec3.add(start, delta) };
     }
     
-    // Try step-up
-    if (tryStepUp(world_collision, start, delta, hull_type)) |step_result| {
-        return step_result;
+    // Try step-up for horizontal movement
+    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
+    if (Vec3.length(horizontal) > EPSILON) {
+        const step_up = Vec3.add(Vec3.add(start, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
+        const step_capsule = world.Capsule.fromHull(step_up, hull_type);
+        if (world_collision.checkCapsule(step_capsule) == null) {
+            const drop_trace = trace(world_collision, step_up, Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0), hull_type);
+            const final_pos = Vec3.add(drop_trace.end_pos, Vec3.new(0, delta.data[1], 0));
+            const final_capsule = world.Capsule.fromHull(final_pos, hull_type);
+            if (world_collision.checkCapsule(final_capsule) == null) {
+                return .{ .pos = final_pos };
+            }
+        }
     }
     
-    // Swept collision with sliding
-    return sweptMove(world_collision, start, delta, hull_type);
+    // Slide movement
+    return slide(world_collision, start, delta, hull_type);
 }
 
-fn sweptMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_type: HullType) Move {
+const TraceResult = struct { end_pos: Vec3, collision: ?world.Collision, time: f32 };
+
+fn trace(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) TraceResult {
+    const move_length = Vec3.length(delta);
+    if (move_length < EPSILON) return .{ .end_pos = start, .collision = null, .time = 1.0 };
+    
+    var best_time: f32 = 1.0;
+    var collision: ?world.Collision = null;
+    
+    const samples = @min(16, @max(4, @as(u32, @intFromFloat(move_length * 10))));
+    for (0..samples) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
+        const test_pos = Vec3.add(start, Vec3.scale(delta, t));
+        const capsule = world.Capsule.fromHull(test_pos, hull_type);
+        
+        if (world_collision.checkCapsule(capsule)) |hit| {
+            best_time = binarySearch(world_collision, start, delta, hull_type, 
+                                   if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
+            collision = hit;
+            break;
+        }
+    }
+    
+    if (collision != null) {
+        best_time = @max(0, best_time - COLLISION_MARGIN / move_length);
+    }
+    
+    return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .collision = collision, .time = best_time };
+}
+
+fn slide(world_collision: *const World, start: Vec3, velocity: Vec3, hull_type: HullType) Move {
     var pos = start;
     var vel = velocity;
     var remaining_time: f32 = 1.0;
@@ -142,17 +175,16 @@ fn sweptMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_ty
     for (0..3) |bump| {
         if (Vec3.length(vel) < EPSILON or remaining_time <= 0.001) break;
         
-        const trace = sweptTrace(world_collision, pos, Vec3.scale(vel, remaining_time), hull_type);
-        pos = trace.end_pos;
+        const result = trace(world_collision, pos, Vec3.scale(vel, remaining_time), hull_type);
+        pos = result.end_pos;
         
-        if (trace.collision) |collision| {
+        if (result.collision) |collision| {
             if (first_collision == null) first_collision = collision;
-            remaining_time *= (1.0 - trace.time);
+            remaining_time *= (1.0 - result.time);
             
             const into_surface = Vec3.dot(vel, collision.normal);
             if (into_surface >= 0) break;
             
-            // Store and clip against collision planes
             if (num_planes < planes.len) {
                 planes[num_planes] = collision.normal;
                 num_planes += 1;
@@ -170,55 +202,7 @@ fn sweptMove(world_collision: *const World, start: Vec3, velocity: Vec3, hull_ty
     return .{ .pos = pos, .collision = first_collision };
 }
 
-const SweptResult = struct { end_pos: Vec3, collision: ?world.Collision, time: f32 };
-
-fn sweptTrace(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) SweptResult {
-    const move_length = Vec3.length(delta);
-    if (move_length < EPSILON) return .{ .end_pos = start, .collision = null, .time = 1.0 };
-    
-    var best_time: f32 = 1.0;
-    var collision: ?world.Collision = null;
-    
-    // Swept collision detection using binary search
-    const samples = @min(16, @max(4, @as(u32, @intFromFloat(move_length * 10))));
-    for (0..samples) |i| {
-        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
-        const test_pos = Vec3.add(start, Vec3.scale(delta, t));
-        const capsule = world.Capsule.fromHull(test_pos, hull_type);
-        
-        if (world_collision.checkCapsule(capsule)) |hit| {
-            best_time = binarySearchSwept(world_collision, start, delta, hull_type, 
-                                        if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
-            collision = hit;
-            break;
-        }
-    }
-    
-    // Apply collision margin
-    if (collision != null) {
-        best_time = @max(0, best_time - COLLISION_MARGIN / move_length);
-    }
-    
-    return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .collision = collision, .time = best_time };
-}
-
-fn tryStepUp(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) ?Move {
-    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
-    if (Vec3.length(horizontal) < EPSILON) return null;
-    
-    const step_up = Vec3.add(Vec3.add(start, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
-    const step_capsule = world.Capsule.fromHull(step_up, hull_type);
-    if (world_collision.checkCapsule(step_capsule) != null) return null;
-    
-    const drop_trace = sweptTrace(world_collision, step_up, Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0), hull_type);
-    const final_pos = Vec3.add(drop_trace.end_pos, Vec3.new(0, delta.data[1], 0));
-    
-    const final_capsule = world.Capsule.fromHull(final_pos, hull_type);
-    return if (world_collision.checkCapsule(final_capsule) == null) 
-        .{ .pos = final_pos } else .{ .pos = drop_trace.end_pos };
-}
-
-fn binarySearchSwept(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType, low: f32, high: f32) f32 {
+fn binarySearch(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType, low: f32, high: f32) f32 {
     var l = low;
     var h = high;
     for (0..8) |_| {
