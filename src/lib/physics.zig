@@ -1,30 +1,29 @@
 const std = @import("std");
 const math = @import("math.zig");
 const world = @import("world.zig");
+const config = @import("config.zig");
 
 const Vec3 = math.Vec3;
 const World = world.World;
 const HullType = world.HullType;
 const Collision = world.Collision;
 const EPSILON = math.EPSILON;
-const STEP_HEIGHT = math.STEP_HEIGHT;
 const GROUND_SNAP = math.GROUND_SNAP;
-const COLLISION_MARGIN: f32 = 0.02;
 
 pub const Move = struct { pos: Vec3, collision: ?world.Collision = null };
 
 pub const Config = struct {
-    gravity: f32 = 12.0,
-    jump_velocity: f32 = 4.0,
-    max_speed: f32 = 4.0,
-    air_speed: f32 = 0.7,
-    acceleration: f32 = 70.0,
-    friction: f32 = 5.0,
-    jump_sound_duration: f32 = 0.15,
+    gravity: f32 = config.Physics.Movement.gravity,
+    jump_velocity: f32 = config.Physics.Movement.jump_velocity,
+    max_speed: f32 = config.Physics.Movement.max_speed,
+    air_speed: f32 = config.Physics.Movement.air_speed,
+    acceleration: f32 = config.Physics.Movement.acceleration,
+    friction: f32 = config.Physics.Movement.friction,
+    jump_sound_duration: f32 = config.Audio.jump_sound_duration,
 };
 
 pub const Transform = struct { pos: Vec3 = Vec3.zero() };
-pub const Physics = struct { vel: Vec3 = Vec3.zero(), on_ground: bool = false, crouching: bool = false };
+pub const Physics = struct { vel: Vec3 = Vec3.zero(), on_ground: bool = false };
 pub const Input = struct { 
     yaw: f32 = 0, pitch: f32 = 0, mdx: f32 = 0, mdy: f32 = 0,
     keys: packed struct { w: bool = false, a: bool = false, s: bool = false, d: bool = false, sp: bool = false } = .{}, 
@@ -33,26 +32,24 @@ pub const Input = struct {
 pub const Audio = struct { timer: f32 = 0, active: bool = false };
 
 pub fn update(transforms: []Transform, physics: []Physics, inputs: []Input, audios: []Audio, collision_world: *const World, dt: f32) void {
-    const config = Config{};
+    const physics_config = Config{};
     for (transforms, physics, inputs, audios) |*t, *p, *i, *a| {
-        const hull_type: HullType = if (p.crouching) .crouching else .standing;
-        
         // Ground check and physics
-        p.on_ground = isOnGround(collision_world, t.pos, hull_type);
-        if (!p.on_ground) p.vel.data[1] -= config.gravity * dt;
+        p.on_ground = isOnGround(collision_world, t.pos);
+        if (!p.on_ground) p.vel.data[1] -= physics_config.gravity * dt;
         if (i.keys.sp and p.on_ground) { 
-            p.vel.data[1] = config.jump_velocity; 
-            a.timer = config.jump_sound_duration; 
+            p.vel.data[1] = physics_config.jump_velocity; 
+            a.timer = physics_config.jump_sound_duration; 
             a.active = true; 
         }
         
         // Movement
         const input_dir = getInputDirection(i.*);
-        accelerate(&p.vel, input_dir, p.on_ground, dt, config);
-        if (p.on_ground) applyFriction(&p.vel, dt, config.friction);
+        accelerate(&p.vel, input_dir, p.on_ground, dt, physics_config);
+        if (p.on_ground) applyFriction(&p.vel, dt, physics_config.friction);
         
         // Move and handle collisions
-        const move_result = move(collision_world, t.pos, Vec3.scale(p.vel, dt), hull_type);
+        const move_result = move(collision_world, t.pos, Vec3.scale(p.vel, dt));
         t.pos = move_result.pos;
         
         if (move_result.collision) |collision| {
@@ -72,14 +69,14 @@ fn getInputDirection(input: Input) Vec3 {
     return Vec3.add(Vec3.scale(fwd_vec, fwd), Vec3.scale(side_vec, side));
 }
 
-fn accelerate(vel: *Vec3, wish_dir: Vec3, on_ground: bool, dt: f32, config: Config) void {
+fn accelerate(vel: *Vec3, wish_dir: Vec3, on_ground: bool, dt: f32, physics_config: Config) void {
     const len = @sqrt(wish_dir.data[0] * wish_dir.data[0] + wish_dir.data[2] * wish_dir.data[2]);
     if (len < 0.001) return;
     
     const wish = Vec3.scale(wish_dir, 1.0 / len);
-    const max_vel = if (on_ground) config.max_speed * len else @min(config.max_speed * len, config.air_speed);
+    const max_vel = if (on_ground) physics_config.max_speed * len else @min(physics_config.max_speed * len, physics_config.air_speed);
     const current_vel = Vec3.dot(Vec3.new(vel.data[0], 0, vel.data[2]), wish);
-    const accel = @min(config.acceleration * dt, @max(0, max_vel - current_vel));
+    const accel = @min(physics_config.acceleration * dt, @max(0, max_vel - current_vel));
     
     vel.data[0] += wish.data[0] * accel;
     vel.data[2] += wish.data[2] * accel;
@@ -97,60 +94,45 @@ fn applyFriction(vel: *Vec3, dt: f32, friction: f32) void {
     }
 }
 
-fn isOnGround(world_collision: *const World, pos: Vec3, hull_type: HullType) bool {
+fn isOnGround(world_collision: *const World, pos: Vec3) bool {
     const test_pos = Vec3.new(pos.data[0], pos.data[1] - GROUND_SNAP, pos.data[2]);
-    const capsule = world.Capsule.fromHull(test_pos, hull_type);
+    const capsule = world.Capsule.fromHull(test_pos, .standing);
     if (world_collision.checkCapsule(capsule)) |collision| {
-        return collision.normal.data[1] > 0.707; // 45 degree slope limit
+        return collision.normal.data[1] > config.Physics.Collision.slope_limit;
     }
     return false;
 }
 
-pub fn move(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) Move {
+pub fn move(world_collision: *const World, start: Vec3, delta: Vec3) Move {
     if (Vec3.length(delta) < EPSILON) return .{ .pos = start };
     
     // Try direct movement
-    const end_capsule = world.Capsule.fromHull(Vec3.add(start, delta), hull_type);
+    const end_capsule = world.Capsule.fromHull(Vec3.add(start, delta), .standing);
     if (world_collision.checkCapsule(end_capsule) == null) {
         return .{ .pos = Vec3.add(start, delta) };
     }
     
-    // Try step-up for horizontal movement
-    const horizontal = Vec3.new(delta.data[0], 0, delta.data[2]);
-    if (Vec3.length(horizontal) > EPSILON) {
-        const step_up = Vec3.add(Vec3.add(start, horizontal), Vec3.new(0, STEP_HEIGHT, 0));
-        const step_capsule = world.Capsule.fromHull(step_up, hull_type);
-        if (world_collision.checkCapsule(step_capsule) == null) {
-            const drop_trace = trace(world_collision, step_up, Vec3.new(0, -(STEP_HEIGHT + GROUND_SNAP), 0), hull_type);
-            const final_pos = Vec3.add(drop_trace.end_pos, Vec3.new(0, delta.data[1], 0));
-            const final_capsule = world.Capsule.fromHull(final_pos, hull_type);
-            if (world_collision.checkCapsule(final_capsule) == null) {
-                return .{ .pos = final_pos };
-            }
-        }
-    }
-    
     // Slide movement
-    return slide(world_collision, start, delta, hull_type);
+    return slide(world_collision, start, delta);
 }
 
 const TraceResult = struct { end_pos: Vec3, collision: ?world.Collision, time: f32 };
 
-fn trace(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType) TraceResult {
+fn trace(world_collision: *const World, start: Vec3, delta: Vec3) TraceResult {
     const move_length = Vec3.length(delta);
     if (move_length < EPSILON) return .{ .end_pos = start, .collision = null, .time = 1.0 };
     
     var best_time: f32 = 1.0;
     var collision: ?world.Collision = null;
     
-    const samples = @min(16, @max(4, @as(u32, @intFromFloat(move_length * 10))));
+    const samples = @min(config.Physics.Collision.trace_samples_max, @max(config.Physics.Collision.trace_samples_min, @as(u32, @intFromFloat(move_length * config.Physics.Collision.trace_samples_multiplier))));
     for (0..samples) |i| {
         const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
         const test_pos = Vec3.add(start, Vec3.scale(delta, t));
-        const capsule = world.Capsule.fromHull(test_pos, hull_type);
+        const capsule = world.Capsule.fromHull(test_pos, .standing);
         
         if (world_collision.checkCapsule(capsule)) |hit| {
-            best_time = binarySearch(world_collision, start, delta, hull_type, 
+            best_time = binarySearch(world_collision, start, delta, 
                                    if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
             collision = hit;
             break;
@@ -158,24 +140,24 @@ fn trace(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: Hul
     }
     
     if (collision != null) {
-        best_time = @max(0, best_time - COLLISION_MARGIN / move_length);
+        best_time = @max(0, best_time - config.Physics.Collision.margin / move_length);
     }
     
     return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .collision = collision, .time = best_time };
 }
 
-fn slide(world_collision: *const World, start: Vec3, velocity: Vec3, hull_type: HullType) Move {
+fn slide(world_collision: *const World, start: Vec3, velocity: Vec3) Move {
     var pos = start;
     var vel = velocity;
     var remaining_time: f32 = 1.0;
     var first_collision: ?world.Collision = null;
-    var planes: [3]Vec3 = undefined;
+    var planes: [config.Physics.Collision.max_slide_iterations]Vec3 = undefined;
     var num_planes: u32 = 0;
     
-    for (0..3) |bump| {
+    for (0..config.Physics.Collision.max_slide_iterations) |bump| {
         if (Vec3.length(vel) < EPSILON or remaining_time <= 0.001) break;
         
-        const result = trace(world_collision, pos, Vec3.scale(vel, remaining_time), hull_type);
+        const result = trace(world_collision, pos, Vec3.scale(vel, remaining_time));
         pos = result.end_pos;
         
         if (result.collision) |collision| {
@@ -195,20 +177,20 @@ fn slide(world_collision: *const World, start: Vec3, velocity: Vec3, hull_type: 
                 if (dot < 0) vel = Vec3.sub(vel, Vec3.scale(plane, dot));
             }
             
-            vel = Vec3.scale(vel, 0.95 - (@as(f32, @floatFromInt(bump)) * 0.05));
+            vel = Vec3.scale(vel, config.Physics.Collision.slide_damping - (@as(f32, @floatFromInt(bump)) * config.Physics.Collision.slide_damping_step));
         } else break;
     }
     
     return .{ .pos = pos, .collision = first_collision };
 }
 
-fn binarySearch(world_collision: *const World, start: Vec3, delta: Vec3, hull_type: HullType, low: f32, high: f32) f32 {
+fn binarySearch(world_collision: *const World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
     var l = low;
     var h = high;
-    for (0..8) |_| {
+    for (0..config.Physics.Collision.binary_search_iterations) |_| {
         const mid = (l + h) * 0.5;
         const test_pos = Vec3.add(start, Vec3.scale(delta, mid));
-        const capsule = world.Capsule.fromHull(test_pos, hull_type);
+        const capsule = world.Capsule.fromHull(test_pos, .standing);
         
         if (world_collision.checkCapsule(capsule) != null) {
             h = mid;

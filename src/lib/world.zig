@@ -1,9 +1,10 @@
 const std = @import("std");
 const math = @import("math.zig");
+const config = @import("config.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 
-pub const HullType = enum { point, standing, crouching };
+pub const HullType = enum { point, standing };
 pub const Collision = struct { normal: Vec3, distance: f32 };
 
 pub const Capsule = struct {
@@ -12,8 +13,7 @@ pub const Capsule = struct {
     pub fn fromHull(pos: Vec3, hull_type: HullType) Capsule {
         return switch (hull_type) {
             .point => .{ .start = pos, .end = pos, .radius = 0.0 },
-            .standing => .{ .start = Vec3.add(pos, Vec3.new(0, -0.7, 0)), .end = Vec3.add(pos, Vec3.new(0, 0.7, 0)), .radius = 0.3 },
-            .crouching => .{ .start = Vec3.add(pos, Vec3.new(0, -0.4, 0)), .end = Vec3.add(pos, Vec3.new(0, 0.4, 0)), .radius = 0.3 },
+            .standing => .{ .start = Vec3.add(pos, Vec3.new(0, -config.Physics.Hull.standing_height, 0)), .end = Vec3.add(pos, Vec3.new(0, config.Physics.Hull.standing_height, 0)), .radius = config.Physics.Hull.standing_radius },
         };
     }
     
@@ -158,8 +158,8 @@ const BVH = struct {
         return try self.layoutBreadthFirst(nodes.items);
     }
     
-    fn buildRecursive(self: *BVH, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node), comptime config: struct {
-        max_leaf_size: u32 = 4,
+    fn buildRecursive(self: *BVH, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node), comptime bvh_config: struct {
+        max_leaf_size: u32 = config.World.BVH.max_leaf_size,
     }) !u32 {
         const node_idx = @as(u32, @intCast(nodes.items.len));
         var bounds = self.brushes[self.indices.items[start]].bounds;
@@ -171,7 +171,7 @@ const BVH = struct {
             .first = start, .count = @intCast(count), .axis = 3,
         });
         
-        if (count <= config.max_leaf_size) return node_idx;
+        if (count <= bvh_config.max_leaf_size) return node_idx;
         
         const split = self.findBestSplit(start, count, bounds, .{});
         if (split.cost >= @as(f32, @floatFromInt(count))) return node_idx;
@@ -181,8 +181,8 @@ const BVH = struct {
         const right_count = (start + count) - split_idx;
         if (left_count == 0 or right_count == 0) return node_idx;
         
-        const left_child = try self.buildRecursive(start, left_count, nodes, config);
-        _ = try self.buildRecursive(split_idx, right_count, nodes, config);
+        const left_child = try self.buildRecursive(start, left_count, nodes, bvh_config);
+        _ = try self.buildRecursive(split_idx, right_count, nodes, bvh_config);
         
         nodes.items[node_idx].first = left_child;
         nodes.items[node_idx].count = 0;
@@ -192,9 +192,9 @@ const BVH = struct {
     
     const Split = struct { axis: u32, pos: f32, cost: f32 };
     
-    fn findBestSplit(self: *BVH, start: u32, count: u32, bounds: AABB, comptime config: struct {
-        traversal_cost: f32 = 0.3,
-        epsilon: f32 = 1e-6,
+    fn findBestSplit(self: *BVH, start: u32, count: u32, bounds: AABB, comptime bvh_config: struct {
+        traversal_cost: f32 = config.World.BVH.traversal_cost,
+        epsilon: f32 = config.World.BVH.epsilon,
     }) Split {
         var best = Split{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
         const parent_area = bounds.surface_area();
@@ -227,7 +227,7 @@ const BVH = struct {
                 
                 const left_area = if (left_bounds) |lb| lb.surface_area() else 0;
                 const right_area = if (right_bounds) |rb| rb.surface_area() else 0;
-                const cost = config.traversal_cost + (left_area / parent_area) * @as(f32, @floatFromInt(left_count)) + (right_area / parent_area) * @as(f32, @floatFromInt(right_count));
+                const cost = bvh_config.traversal_cost + (left_area / parent_area) * @as(f32, @floatFromInt(left_count)) + (right_area / parent_area) * @as(f32, @floatFromInt(right_count));
                 
                 if (cost < best.cost) {
                     best = .{ .axis = @intCast(axis), .pos = split_pos, .cost = cost };
@@ -300,8 +300,8 @@ pub const World = struct {
         self.bvh.deinit();
     }
     
-    pub fn check(self: *const World, point: Vec3, hull_type: HullType) ?Collision {
-        const capsule = Capsule.fromHull(point, hull_type);
+    pub fn check(self: *const World, point: Vec3) ?Collision {
+        const capsule = Capsule.fromHull(point, .standing);
         return self.bvh.checkCapsule(capsule);
     }
     

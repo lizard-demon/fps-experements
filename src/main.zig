@@ -11,6 +11,7 @@ const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
 const world = @import("lib/world.zig");
 const physics = @import("lib/physics.zig");
+const config = @import("lib/config.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
@@ -29,7 +30,7 @@ const Player = struct { transform: Transform, physics: Physics, input: Input, au
 const Registry = struct { players: ecs.List(Player) };
 
 // Resources
-const GameResources = struct {
+const Resources = struct {
     delta_time: f32 = 0,
     allocator: std.mem.Allocator,
     player_entity: ecs.Entity(Player) = undefined,
@@ -56,7 +57,7 @@ const GameResources = struct {
         var brush_idx: usize = 0;
         
         // 1. Massive ground platform
-        brush_idx += self.addBoxBrush(&plane_idx, Vec3.new(0, -2.25, 0), Vec3.new(100, 4.5, 100), brush_idx);
+        brush_idx += self.addBoxBrush(&plane_idx, Vec3.new(0, config.World.Geometry.ground_center_y, 0), Vec3.new(config.World.Geometry.ground_size_x, config.World.Geometry.ground_size_y, config.World.Geometry.ground_size_z), brush_idx);
         
         // 2. Massive slope/mountain
         brush_idx += self.addSlopeBrush(&plane_idx, brush_idx);
@@ -104,16 +105,16 @@ const GameResources = struct {
     fn addSlopeBrush(self: *@This(), plane_idx: *usize, brush_idx: usize) u32 {
         if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
         
-        const slope_width = 30.0;
-        const slope_height = 20.0;
-        const slope_center = Vec3.new(0, 0, 20);
-        const slope_angle = std.math.pi / 6.0; // 30 degrees
+        const slope_width = config.World.Geometry.slope_width;
+        const slope_height = config.World.Geometry.slope_height;
+        const slope_center = Vec3.new(0, 0, config.World.Geometry.slope_center_z);
+        const slope_angle = config.World.Geometry.slope_angle_degrees * config.Math.degrees_to_radians;
         
         const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
         const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
         
         const planes = [6]world.Plane{
-            .{ .normal = Vec3.new( 0, -1,  0), .distance = 0.5 },
+            .{ .normal = Vec3.new( 0, -1,  0), .distance = config.World.Geometry.slope_ground_level },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = -slope_width/2 },
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -slope_width/2 },
             .{ .normal = Vec3.new( 0,  0, -1), .distance = slope_center.data[2] - slope_width/2 },
@@ -125,7 +126,7 @@ const GameResources = struct {
         self.brushes[brush_idx] = .{ 
             .planes = self.brush_planes[plane_idx.*..plane_idx.* + 6], 
             .bounds = AABB.new(
-                Vec3.new(-slope_width/2, 0.5, slope_center.data[2] - slope_width/2), 
+                Vec3.new(-slope_width/2, config.World.Geometry.slope_ground_level, slope_center.data[2] - slope_width/2), 
                 Vec3.new(slope_width/2, slope_height, slope_center.data[2] + slope_width/2)
             )
         };
@@ -164,7 +165,7 @@ const GameResources = struct {
         
         self.pass_action = .{ 
             .colors = .{ 
-                .{ .load_action = .CLEAR, .clear_value = .{ .r = 0.15, .g = 0.15, .b = 0.18, .a = 1.0 } }, 
+                .{ .load_action = .CLEAR, .clear_value = .{ .r = config.Rendering.ClearColor.r, .g = config.Rendering.ClearColor.g, .b = config.Rendering.ClearColor.b, .a = config.Rendering.ClearColor.a } }, 
                 .{}, .{}, .{}, .{}, .{}, .{}, .{} 
             } 
         };
@@ -187,7 +188,7 @@ const GameResources = struct {
     }
     
     fn render(self: *const @This(), view: Mat4) void {
-        const mvp = Mat4.mul(math.perspective(90, 1.33, 0.1, 500), view); // Increased far plane to 500
+        const mvp = Mat4.mul(math.perspective(config.Rendering.fov, config.Rendering.aspect_ratio, config.Rendering.near_plane, config.Rendering.far_plane), view);
         sg.beginPass(.{ .action = self.pass_action, .swapchain = sokol.glue.swapchain() });
         sg.applyPipeline(self.pipeline);
         sg.applyBindings(self.bindings);
@@ -197,13 +198,13 @@ const GameResources = struct {
 };
 
 // Configuration constants
-const MOUSE_SENSITIVITY: f32 = 0.002;
-const PITCH_LIMIT: f32 = 1.5;
-const EYE_HEIGHT: f32 = 0.6;
-const CROSSHAIR_SIZE: f32 = 8.0;
+const MOUSE_SENSITIVITY: f32 = config.Input.mouse_sensitivity;
+const PITCH_LIMIT: f32 = config.Input.pitch_limit;
+const EYE_HEIGHT: f32 = config.Rendering.eye_height;
+const CROSSHAIR_SIZE: f32 = config.Rendering.crosshair_size;
 
 // Systems
-fn sys_input(inputs: []Input, resources: *GameResources) void {
+fn sys_input(inputs: []Input, resources: *Resources) void {
     _ = resources;
     for (inputs) |*i| {
         i.yaw += i.mdx * MOUSE_SENSITIVITY;
@@ -212,11 +213,11 @@ fn sys_input(inputs: []Input, resources: *GameResources) void {
     }
 }
 
-fn sys_physics(transforms: []Transform, physics_comps: []Physics, inputs: []Input, audios: []Audio, resources: *GameResources) void {
+fn sys_physics(transforms: []Transform, physics_comps: []Physics, inputs: []Input, audios: []Audio, resources: *Resources) void {
     physics.update(transforms, physics_comps, inputs, audios, &resources.world, resources.delta_time);
 }
 
-fn sys_render(transforms: []Transform, inputs: []Input, resources: *GameResources) void {
+fn sys_render(transforms: []Transform, inputs: []Input, resources: *Resources) void {
     for (transforms, inputs) |t, i| {
         const eye = Vec3.add(t.pos, Vec3.new(0, EYE_HEIGHT, 0));
         const cy, const sy = .{ @cos(i.yaw), @sin(i.yaw) };
@@ -236,7 +237,7 @@ fn sys_render(transforms: []Transform, inputs: []Input, resources: *GameResource
 }
 
 // Global state
-var store: ecs.Store(Registry, GameResources) = undefined;
+var store: ecs.Store(Registry, Resources) = undefined;
 var initialized: bool = false;
 
 export fn init() void {
@@ -245,12 +246,12 @@ export fn init() void {
     saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
     
-    store = ecs.Store(Registry, GameResources){ .registry = .{ .players = .{} }, .resources = undefined };
+    store = ecs.Store(Registry, Resources){ .registry = .{ .players = .{} }, .resources = undefined };
     store.resources.init(allocator);
     
     // Build visual representation using original brushes for rendering
     for (store.resources.world.original_brushes) |brush| {
-        store.resources.mesh_builder.addBrush(brush, .{ 0.4, 0.4, 0.4, 1 }) catch continue;
+        store.resources.mesh_builder.addBrush(brush, .{ config.Rendering.BrushColor.r, config.Rendering.BrushColor.g, config.Rendering.BrushColor.b, config.Rendering.BrushColor.a }) catch continue;
     }
     
     store.resources.build() catch |err| {
@@ -259,7 +260,7 @@ export fn init() void {
     
     // Create player - spawn at origin on the large ground plane
     store.resources.player_entity = store.create(Player, allocator, .{
-        .transform = .{ .pos = Vec3.new(0, 3, -20) }, // Start further back to see the slope
+        .transform = .{ .pos = Vec3.new(config.World.Player.spawn_x, config.World.Player.spawn_y, config.World.Player.spawn_z) },
         .physics = .{}, .input = .{}, .audio = .{},
     }) catch |err| {
         std.log.err("Failed to create player entity: {}", .{err});
@@ -280,8 +281,8 @@ export fn frame() void {
     const cx = @as(f32, @floatFromInt(sapp.width())) * 0.5;
     const cy = @as(f32, @floatFromInt(sapp.height())) * 0.5;
     const dl = ig.igGetBackgroundDrawList();
-    ig.ImDrawList_AddLine(dl, .{ .x = cx - CROSSHAIR_SIZE, .y = cy }, .{ .x = cx + CROSSHAIR_SIZE, .y = cy }, 0xFF00FF00);
-    ig.ImDrawList_AddLine(dl, .{ .x = cx, .y = cy - CROSSHAIR_SIZE }, .{ .x = cx, .y = cy + CROSSHAIR_SIZE }, 0xFF00FF00);
+    ig.ImDrawList_AddLine(dl, .{ .x = cx - CROSSHAIR_SIZE, .y = cy }, .{ .x = cx + CROSSHAIR_SIZE, .y = cy }, config.Rendering.CrosshairColor.rgba);
+    ig.ImDrawList_AddLine(dl, .{ .x = cx, .y = cy - CROSSHAIR_SIZE }, .{ .x = cx, .y = cy + CROSSHAIR_SIZE }, config.Rendering.CrosshairColor.rgba);
     
     simgui.render(); sg.endPass(); sg.commit();
 }
@@ -337,10 +338,10 @@ fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
         var sample: f32 = 0;
         for (sources) |*s| {
             if (s.active and s.timer > 0) {
-                const sound_duration = 0.15; // Should match physics config
+                const sound_duration = config.Audio.jump_sound_duration;
                 const t = 1.0 - s.timer / sound_duration;
-                s.timer -= 1.0 / 44100.0;
-                sample += @sin((sound_duration - s.timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
+                s.timer -= 1.0 / config.Audio.sample_rate;
+                sample += @sin((sound_duration - s.timer) * config.Audio.jump_frequency * config.Math.pi) * @exp(-t * config.Audio.jump_decay) * config.Audio.jump_volume;
                 if (s.timer <= 0) s.active = false;
             }
         }
@@ -349,5 +350,5 @@ fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
 }
 
 pub fn main() void {
-    sapp.run(.{ .init_cb = init, .frame_cb = frame, .cleanup_cb = cleanup, .event_cb = event, .width = 1024, .height = 768, .window_title = "FPS" });
+    sapp.run(.{ .init_cb = init, .frame_cb = frame, .cleanup_cb = cleanup, .event_cb = event, .width = config.Window.width, .height = config.Window.height, .window_title = config.Window.title });
 }
