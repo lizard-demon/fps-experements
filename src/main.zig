@@ -8,7 +8,8 @@ const ig = @import("cimgui");
 
 const math = @import("lib/math.zig");
 const ecs = @import("lib/ecs.zig");
-const world = @import("resources/world.zig");
+const collision = @import("resources/collision.zig");
+const mesh = @import("resources/mesh.zig");
 const physics = @import("resources/physics.zig");
 const renderer = @import("resources/render.zig");
 const config = @import("lib/config.zig");
@@ -39,11 +40,11 @@ const Resources = struct {
     renderer: renderer.Renderer = undefined,
     
     // World - now just holds brush data
-    world: world.World = undefined,
+    world: collision.World = undefined,
     
     // Static brush storage for complex demo geometry
-    brush_planes: [80]world.Plane = undefined, // Increased for complex shapes
-    brushes: [8]world.Brush = undefined,
+    brush_planes: [80]collision.Plane = undefined, // Increased for complex shapes
+    brushes: [8]collision.Brush = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
@@ -79,7 +80,7 @@ const Resources = struct {
         if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
         
         const half_size = Vec3.scale(size, 0.5);
-        const planes = [6]world.Plane{
+        const planes = [6]collision.Plane{
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -(center.data[0] + half_size.data[0]) },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = center.data[0] - half_size.data[0] },
             .{ .normal = Vec3.new( 0,  1,  0), .distance = -(center.data[1] + half_size.data[1]) },
@@ -108,7 +109,7 @@ const Resources = struct {
         const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
         const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
         
-        const planes = [6]world.Plane{
+        const planes = [6]collision.Plane{
             .{ .normal = Vec3.new( 0, -1,  0), .distance = config.World.Geometry.slope_ground_level },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = -slope_width/2 },
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -slope_width/2 },
@@ -130,7 +131,7 @@ const Resources = struct {
     }
     
     fn initializeWorld(self: *@This(), brush_count: usize) void {
-        self.world = world.World.init(self.brushes[0..brush_count], self.allocator) catch |err| {
+        self.world = collision.World.init(self.brushes[0..brush_count], self.allocator) catch |err| {
             std.log.err("Failed to initialize world: {}", .{err});
             return;
         };

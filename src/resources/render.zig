@@ -6,7 +6,8 @@ const ig = @import("cimgui");
 
 const math = @import("../lib/math.zig");
 const shader = @import("../shader/cube.glsl.zig");
-const world = @import("world.zig");
+const collision = @import("collision.zig");
+const mesh = @import("mesh.zig");
 const config = @import("../lib/config.zig");
 
 const Vec3 = math.Vec3;
@@ -22,12 +23,12 @@ pub const Renderer = struct {
     vertex_count: u32 = 0,
     
     // World mesh building
-    mesh_builder: world.MeshBuilder = undefined,
+    mesh_builder: mesh.MeshBuilder = undefined,
     
     pub fn init(allocator: std.mem.Allocator) Renderer {
         var renderer = Renderer{
             .allocator = allocator,
-            .mesh_builder = world.MeshBuilder.init(allocator),
+            .mesh_builder = mesh.MeshBuilder.init(allocator),
         };
         
         renderer.initializePipeline();
@@ -64,7 +65,7 @@ pub const Renderer = struct {
         };
     }
     
-    pub fn buildWorldMesh(self: *Renderer, brushes: []const world.Brush) !void {
+    pub fn buildWorldMesh(self: *Renderer, brushes: []const collision.Brush) !void {
         // Build visual representation using brushes for rendering
         for (brushes) |brush| {
             self.mesh_builder.addBrush(brush, .{ 
@@ -86,7 +87,7 @@ pub const Renderer = struct {
             self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ 
                 .data = .{ 
                     .ptr = self.mesh_builder.vertices.items.ptr, 
-                    .size = self.mesh_builder.vertices.items.len * @sizeOf(world.Vertex) 
+                    .size = self.mesh_builder.vertices.items.len * @sizeOf(mesh.Vertex) 
                 } 
             });
             self.bindings.index_buffer = sg.makeBuffer(.{ 
