@@ -7,10 +7,10 @@ const simgui = sokol.imgui;
 const ig = @import("cimgui");
 
 const math = @import("lib/math.zig");
-const shader = @import("shader/cube.glsl.zig");
 const ecs = @import("lib/ecs.zig");
-const world = @import("lib/world.zig");
-const physics = @import("lib/physics.zig");
+const world = @import("resources/world.zig");
+const physics = @import("resources/physics.zig");
+const renderer = @import("resources/render.zig");
 const config = @import("lib/config.zig");
 
 const Vec3 = math.Vec3;
@@ -36,14 +36,10 @@ const Resources = struct {
     player_entity: ecs.Entity(Player) = undefined,
     
     // Rendering
-    pipeline: sg.Pipeline = undefined,
-    bindings: sg.Bindings = undefined,
-    pass_action: sg.PassAction = undefined,
-    vertex_count: u32 = 0,
+    renderer: renderer.Renderer = undefined,
     
     // World - now just holds brush data
     world: world.World = undefined,
-    mesh_builder: world.MeshBuilder = undefined,
     
     // Static brush storage for complex demo geometry
     brush_planes: [80]world.Plane = undefined, // Increased for complex shapes
@@ -51,7 +47,7 @@ const Resources = struct {
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.mesh_builder = world.MeshBuilder.init(allocator);
+        self.renderer = renderer.Renderer.init(allocator);
         
         var plane_idx: usize = 0;
         var brush_idx: usize = 0;
@@ -77,7 +73,6 @@ const Resources = struct {
         }
         
         self.initializeWorld(brush_idx);
-        self.initializeRendering();
     }
     
     fn addBoxBrush(self: *@This(), plane_idx: *usize, center: Vec3, size: Vec3, brush_idx: usize) u32 {
@@ -150,50 +145,17 @@ const Resources = struct {
         }
     }
     
-    fn initializeRendering(self: *@This()) void {
-        var layout = sg.VertexLayoutState{};
-        layout.attrs[0].format = .FLOAT3;
-        layout.attrs[1].format = .FLOAT4;
-        
-        self.pipeline = sg.makePipeline(.{ 
-            .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), 
-            .layout = layout, 
-            .index_type = .UINT16, 
-            .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, 
-            .cull_mode = .NONE 
-        });
-        
-        self.pass_action = .{ 
-            .colors = .{ 
-                .{ .load_action = .CLEAR, .clear_value = .{ .r = config.Rendering.ClearColor.r, .g = config.Rendering.ClearColor.g, .b = config.Rendering.ClearColor.b, .a = config.Rendering.ClearColor.a } }, 
-                .{}, .{}, .{}, .{}, .{}, .{}, .{} 
-            } 
-        };
+    fn buildWorldMesh(self: *@This()) !void {
+        try self.renderer.buildWorldMesh(self.world.original_brushes);
+    }
+    
+    fn render(self: *const @This(), view: Mat4) void {
+        self.renderer.render(view);
     }
     
     fn deinit(self: *@This()) void {
         self.world.deinit();
-        self.mesh_builder.deinit();
-    }
-    
-    fn build(self: *@This()) !void {
-        if (self.bindings.vertex_buffers[0].id != 0) sg.destroyBuffer(self.bindings.vertex_buffers[0]);
-        if (self.bindings.index_buffer.id != 0) sg.destroyBuffer(self.bindings.index_buffer);
-        if (self.mesh_builder.vertices.items.len > 0) {
-            self.bindings.vertex_buffers[0] = sg.makeBuffer(.{ .data = .{ .ptr = self.mesh_builder.vertices.items.ptr, .size = self.mesh_builder.vertices.items.len * @sizeOf(world.Vertex) } });
-            self.bindings.index_buffer = sg.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = .{ .ptr = self.mesh_builder.indices.items.ptr, .size = self.mesh_builder.indices.items.len * @sizeOf(u16) } });
-        }
-        // Use saturating cast to prevent overflow
-        self.vertex_count = std.math.cast(u32, self.mesh_builder.indices.items.len) orelse std.math.maxInt(u32);
-    }
-    
-    fn render(self: *const @This(), view: Mat4) void {
-        const mvp = Mat4.mul(math.perspective(config.Rendering.fov, config.Rendering.aspect_ratio, config.Rendering.near_plane, config.Rendering.far_plane), view);
-        sg.beginPass(.{ .action = self.pass_action, .swapchain = sokol.glue.swapchain() });
-        sg.applyPipeline(self.pipeline);
-        sg.applyBindings(self.bindings);
-        sg.applyUniforms(0, sg.asRange(&mvp));
-        sg.draw(0, self.vertex_count, 1);
+        self.renderer.deinit();
     }
 };
 
@@ -201,7 +163,6 @@ const Resources = struct {
 const MOUSE_SENSITIVITY: f32 = config.Input.mouse_sensitivity;
 const PITCH_LIMIT: f32 = config.Input.pitch_limit;
 const EYE_HEIGHT: f32 = config.Rendering.eye_height;
-const CROSSHAIR_SIZE: f32 = config.Rendering.crosshair_size;
 
 // Systems
 fn sys_input(inputs: []Input, resources: *Resources) void {
@@ -250,12 +211,8 @@ export fn init() void {
     store.resources.init(allocator);
     
     // Build visual representation using original brushes for rendering
-    for (store.resources.world.original_brushes) |brush| {
-        store.resources.mesh_builder.addBrush(brush, .{ config.Rendering.BrushColor.r, config.Rendering.BrushColor.g, config.Rendering.BrushColor.b, config.Rendering.BrushColor.a }) catch continue;
-    }
-    
-    store.resources.build() catch |err| {
-        std.log.err("Failed to build mesh: {}", .{err});
+    store.resources.buildWorldMesh() catch |err| {
+        std.log.err("Failed to build world mesh: {}", .{err});
     };
     
     // Create player - spawn at origin on the large ground plane
@@ -278,11 +235,7 @@ export fn frame() void {
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
     store.run(sys_render);
     
-    const cx = @as(f32, @floatFromInt(sapp.width())) * 0.5;
-    const cy = @as(f32, @floatFromInt(sapp.height())) * 0.5;
-    const dl = ig.igGetBackgroundDrawList();
-    ig.ImDrawList_AddLine(dl, .{ .x = cx - CROSSHAIR_SIZE, .y = cy }, .{ .x = cx + CROSSHAIR_SIZE, .y = cy }, config.Rendering.CrosshairColor.rgba);
-    ig.ImDrawList_AddLine(dl, .{ .x = cx, .y = cy - CROSSHAIR_SIZE }, .{ .x = cx, .y = cy + CROSSHAIR_SIZE }, config.Rendering.CrosshairColor.rgba);
+    renderer.Renderer.renderCrosshair();
     
     simgui.render(); sg.endPass(); sg.commit();
 }

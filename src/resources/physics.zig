@@ -1,7 +1,7 @@
 const std = @import("std");
-const math = @import("math.zig");
+const math = @import("../lib/math.zig");
 const world = @import("world.zig");
-const config = @import("config.zig");
+const config = @import("../lib/config.zig");
 
 const Vec3 = math.Vec3;
 const World = world.World;

@@ -1,6 +1,6 @@
 const std = @import("std");
-const math = @import("math.zig");
-const config = @import("config.zig");
+const math = @import("../lib/math.zig");
+const config = @import("../lib/config.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 
