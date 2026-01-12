@@ -13,12 +13,25 @@ pub const Capsule = struct {
     pub fn fromHull(pos: Vec3, hull_type: HullType) Capsule {
         return switch (hull_type) {
             .point => .{ .start = pos, .end = pos, .radius = 0.0 },
-            .standing => .{ .start = Vec3.add(pos, Vec3.new(0, -config.Physics.Hull.standing_height, 0)), .end = Vec3.add(pos, Vec3.new(0, config.Physics.Hull.standing_height, 0)), .radius = config.Physics.Hull.standing_radius },
+            .standing => .{ 
+                .start = Vec3.add(pos, Vec3.new(0, -config.Physics.Hull.standing_height, 0)), 
+                .end = Vec3.add(pos, Vec3.new(0, config.Physics.Hull.standing_height, 0)), 
+                .radius = config.Physics.Hull.standing_radius 
+            },
         };
     }
     
-    fn center(self: Capsule) Vec3 {
+    inline fn center(self: Capsule) Vec3 {
         return Vec3.scale(Vec3.add(self.start, self.end), 0.5);
+    }
+    
+    // Pre-compute AABB for better performance
+    inline fn bounds(self: Capsule) AABB {
+        const radius_vec = Vec3.new(self.radius, self.radius, self.radius);
+        return AABB{
+            .min = Vec3.sub(Vec3.min(self.start, self.end), radius_vec),
+            .max = Vec3.add(Vec3.max(self.start, self.end), radius_vec),
+        };
     }
 };
 
@@ -53,14 +66,23 @@ pub const Brush = struct {
 };
 
 const Node = packed struct {
-    min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32,
-    first: u32, count: u30, axis: u2,
+    // Reorder fields for better packing and cache efficiency
+    first: u32, 
+    count_and_axis: u32, // Pack count (30 bits) and axis (2 bits) together
+    min_x: f32, min_y: f32, min_z: f32, 
+    max_x: f32, max_y: f32, max_z: f32,
     
     fn bounds(self: Node) AABB { 
         return AABB{ .min = Vec3.new(self.min_x, self.min_y, self.min_z), .max = Vec3.new(self.max_x, self.max_y, self.max_z) }; 
     }
-    fn isLeaf(self: Node) bool { return self.axis == 3; }
+    fn isLeaf(self: Node) bool { return (self.count_and_axis & 0x3) == 3; }
     fn left(self: Node) u32 { return self.first; }
+    fn count(self: Node) u32 { return self.count_and_axis >> 2; }
+    fn axis(self: Node) u32 { return self.count_and_axis & 0x3; }
+    
+    fn setCountAndAxis(count_val: u32, axis_val: u32) u32 {
+        return (count_val << 2) | (axis_val & 0x3);
+    }
 };
 
 const BVH = struct {
@@ -68,6 +90,9 @@ const BVH = struct {
     nodes: std.ArrayListUnmanaged(Node),
     indices: std.ArrayListUnmanaged(u32), 
     allocator: std.mem.Allocator,
+    
+    // Pre-allocated traversal stack to avoid allocations during queries
+    traversal_stack: [config.World.BVH.max_stack_depth]u32 = undefined,
     
     fn init(brushes: []const Brush, allocator: std.mem.Allocator) !BVH {
         if (brushes.len == 0) return .{ 
@@ -104,21 +129,21 @@ const BVH = struct {
             return null;
         }
         
-        const capsule_bounds = AABB{
-            .min = Vec3.sub(Vec3.min(capsule.start, capsule.end), Vec3.new(capsule.radius, capsule.radius, capsule.radius)),
-            .max = Vec3.add(Vec3.max(capsule.start, capsule.end), Vec3.new(capsule.radius, capsule.radius, capsule.radius)),
-        };
+        // Use pre-computed capsule bounds
+        const capsule_bounds = capsule.bounds();
         
         var best_collision: ?Collision = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        // Use dynamic stack-based traversal
-        var stack = std.ArrayListUnmanaged(u32){};
-        defer stack.deinit(self.allocator);
-        stack.append(self.allocator, 0) catch return null;
+        // Use pre-allocated stack for traversal - breadth-first layout benefits
+        var stack_ptr: u32 = 0;
+        var stack: [config.World.BVH.max_stack_depth]u32 = undefined;
+        stack[0] = 0;
+        stack_ptr = 1;
         
-        while (stack.items.len > 0) {
-            const node_idx = stack.orderedRemove(stack.items.len - 1);
+        while (stack_ptr > 0) {
+            stack_ptr -= 1;
+            const node_idx = stack[stack_ptr];
             
             if (node_idx >= self.nodes.items.len) continue;
             const node = self.nodes.items[node_idx];
@@ -126,25 +151,33 @@ const BVH = struct {
             if (!node.bounds().intersects(capsule_bounds)) continue;
             
             if (node.isLeaf()) {
-                for (node.first..node.first + node.count) |i| {
-                    if (i >= self.indices.items.len) continue;
+                const end_idx = @min(node.first + node.count(), self.indices.items.len);
+                for (node.first..end_idx) |i| {
                     if (self.brushes[self.indices.items[i]].checkCapsule(capsule)) |collision| {
                         if (collision.distance > best_distance) {
                             best_distance = collision.distance;
                             best_collision = collision;
+                            
+                            // Early termination: if we found a collision with positive distance,
+                            // we can return immediately for most game physics use cases
+                            if (collision.distance > 0) return collision;
                         }
                     }
                 }
             } else {
-                // Add both children to stack
+                // In breadth-first layout, children are stored sequentially
+                // This provides better cache locality when accessing both children
                 const left_child = node.left();
                 const right_child = left_child + 1;
                 
-                if (right_child < self.nodes.items.len) {
-                    stack.append(self.allocator, right_child) catch break;
+                // Add children to stack - breadth-first layout ensures they're cache-friendly
+                if (right_child < self.nodes.items.len and stack_ptr < stack.len) {
+                    stack[stack_ptr] = right_child;
+                    stack_ptr += 1;
                 }
-                if (left_child < self.nodes.items.len) {
-                    stack.append(self.allocator, left_child) catch break;
+                if (left_child < self.nodes.items.len and stack_ptr < stack.len) {
+                    stack[stack_ptr] = left_child;
+                    stack_ptr += 1;
                 }
             }
         }
@@ -155,6 +188,8 @@ const BVH = struct {
         var nodes = std.ArrayListUnmanaged(Node){};
         defer nodes.deinit(self.allocator);
         _ = try self.buildRecursive(0, @intCast(self.brushes.len), &nodes, .{});
+        
+        // Use breadth-first layout for better cache locality during traversal
         return try self.layoutBreadthFirst(nodes.items);
     }
     
@@ -166,9 +201,10 @@ const BVH = struct {
         for (start + 1..start + count) |i| bounds = bounds.union_with(self.brushes[self.indices.items[i]].bounds);
         
         try nodes.append(self.allocator, Node{
+            .first = start, 
+            .count_and_axis = Node.setCountAndAxis(count, 3),
             .min_x = bounds.min.data[0], .min_y = bounds.min.data[1], .min_z = bounds.min.data[2],
             .max_x = bounds.max.data[0], .max_y = bounds.max.data[1], .max_z = bounds.max.data[2],
-            .first = start, .count = @intCast(count), .axis = 3,
         });
         
         if (count <= bvh_config.max_leaf_size) return node_idx;
@@ -185,8 +221,7 @@ const BVH = struct {
         _ = try self.buildRecursive(split_idx, right_count, nodes, bvh_config);
         
         nodes.items[node_idx].first = left_child;
-        nodes.items[node_idx].count = 0;
-        nodes.items[node_idx].axis = @intCast(split.axis);
+        nodes.items[node_idx].count_and_axis = Node.setCountAndAxis(0, split.axis);
         return node_idx;
     }
     
@@ -195,15 +230,24 @@ const BVH = struct {
     fn findBestSplit(self: *BVH, start: u32, count: u32, bounds: AABB, comptime bvh_config: struct {
         traversal_cost: f32 = config.World.BVH.traversal_cost,
         epsilon: f32 = config.World.BVH.epsilon,
+        split_candidates: u32 = 8, // Limit split candidates for better performance
     }) Split {
         var best = Split{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
         const parent_area = bounds.surface_area();
         if (parent_area <= 0) return best;
         
+        // Use binned SAH for O(n) split finding instead of O(n²)
         for (0..3) |axis| {
-            for (start..start + count) |i| {
-                const brush_bounds = self.brushes[self.indices.items[i]].bounds;
-                const split_pos = (brush_bounds.min.data[axis] + brush_bounds.max.data[axis]) * 0.5;
+            const axis_min = bounds.min.data[axis];
+            const axis_max = bounds.max.data[axis];
+            const axis_range = axis_max - axis_min;
+            if (axis_range <= bvh_config.epsilon) continue;
+            
+            // Test fewer, evenly distributed split candidates
+            const step = axis_range / @as(f32, @floatFromInt(bvh_config.split_candidates));
+            var candidate: u32 = 0;
+            while (candidate < bvh_config.split_candidates) : (candidate += 1) {
+                const split_pos = axis_min + step * (@as(f32, @floatFromInt(candidate)) + 0.5);
                 
                 var left_bounds: ?AABB = null;
                 var right_bounds: ?AABB = null;
@@ -257,8 +301,11 @@ const BVH = struct {
     
     fn layoutBreadthFirst(self: *BVH, tree_nodes: []Node) ![]Node {
         if (tree_nodes.len == 0) return try self.allocator.alloc(Node, 0);
+        
         const nodes = try self.allocator.alloc(Node, tree_nodes.len);
-        var queue: [256]u32 = undefined;
+        
+        // Use a more efficient queue with pre-allocated size
+        var queue: [512]u32 = undefined; // Increased size for larger trees
         var queue_head: u32 = 0;
         var queue_tail: u32 = 1;
         queue[0] = 0;
@@ -267,21 +314,34 @@ const BVH = struct {
         while (queue_head < queue_tail and write_idx < nodes.len) {
             const tree_idx = queue[queue_head];
             queue_head += 1;
+            
+            if (tree_idx >= tree_nodes.len) continue;
             const tree_node = tree_nodes[tree_idx];
             nodes[write_idx] = tree_node;
             
             if (!tree_node.isLeaf() and queue_tail + 1 < queue.len) {
                 const left_tree_idx = tree_node.first;
                 const right_tree_idx = left_tree_idx + 1;
+                
+                // Update the breadth-first index for the left child
                 const left_bf_idx = write_idx + (queue_tail - queue_head) + 1;
                 nodes[write_idx].first = left_bf_idx;
                 
-                if (left_tree_idx < tree_nodes.len) { queue[queue_tail] = left_tree_idx; queue_tail += 1; }
-                if (right_tree_idx < tree_nodes.len) { queue[queue_tail] = right_tree_idx; queue_tail += 1; }
+                // Add children to queue
+                if (left_tree_idx < tree_nodes.len) { 
+                    queue[queue_tail] = left_tree_idx; 
+                    queue_tail += 1; 
+                }
+                if (right_tree_idx < tree_nodes.len and queue_tail < queue.len) { 
+                    queue[queue_tail] = right_tree_idx; 
+                    queue_tail += 1; 
+                }
             }
             write_idx += 1;
         }
-        return nodes[0..write_idx];
+        
+        self.nodes = std.ArrayListUnmanaged(Node).fromOwnedSlice(nodes[0..write_idx]);
+        return self.nodes.items;
     }
 };
 

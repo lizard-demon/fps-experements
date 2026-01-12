@@ -93,6 +93,8 @@ pub const World = struct {
         pub const traversal_cost: f32 = 0.3;
         pub const max_leaf_size: u32 = 4;
         pub const epsilon: f32 = 1e-6;
+        pub const split_candidates: u32 = 8; // Reduced from testing every primitive
+        pub const max_stack_depth: u32 = 64; // For traversal stack
     };
 };
 
