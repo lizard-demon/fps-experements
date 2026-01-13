@@ -45,6 +45,33 @@ pub const Brush = struct {
     plane_data: PlaneData, 
     bounds: AABB,
     
+    pub fn expand(self: Brush, radius: f32, allocator: std.mem.Allocator) !Brush {
+        // Expand each plane outward by the radius
+        var expanded_normals = try allocator.alloc(Vec3, self.plane_data.len());
+        var expanded_distances = try allocator.alloc(f32, self.plane_data.len());
+        
+        for (0..self.plane_data.len()) |i| {
+            const plane = self.plane_data.get(i);
+            expanded_normals[i] = plane.normal;
+            expanded_distances[i] = plane.distance - radius; // Move plane outward
+        }
+        
+        // Expand bounds by radius
+        const radius_vec = Vec3.new(radius, radius, radius);
+        const expanded_bounds = AABB{
+            .min = Vec3.sub(self.bounds.min, radius_vec),
+            .max = Vec3.add(self.bounds.max, radius_vec),
+        };
+        
+        return Brush{
+            .plane_data = .{
+                .normals = expanded_normals,
+                .distances = expanded_distances,
+            },
+            .bounds = expanded_bounds,
+        };
+    }
+    
     pub fn rayIntersect(self: Brush, ray_start: Vec3, ray_dir: Vec3, max_distance: f32) ?CollisionResult {
         var entry_time: f32 = 0;
         var exit_time: f32 = max_distance;

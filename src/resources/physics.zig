@@ -22,6 +22,9 @@ pub const Config = struct {
     slide_damping_step: f32 = 0.05,
     max_slide_iterations: u32 = 3,
     
+    // Player dimensions for brush expansion
+    player_radius: f32 = 0.3,
+    
     // BVH stack sizing
     min_stack_size: u32 = 32,
     stack_size_multiplier: u32 = 2,
@@ -42,11 +45,18 @@ pub const World = struct {
     bvh_tree: bvh.BVH(brush.Brush),
     stack: std.ArrayListUnmanaged(u32),
     allocator: std.mem.Allocator,
+    brushes: []brush.Brush,
     
     const config = Config{};
     
-    pub fn init(brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
-        if (brushes.len == 0) return error.NoBrushes;
+    pub fn init(original_brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
+        if (original_brushes.len == 0) return error.NoBrushes;
+        
+        // Expand brushes by player radius for point-based collision
+        var brushes = try allocator.alloc(brush.Brush, original_brushes.len);
+        for (original_brushes, 0..) |b, i| {
+            brushes[i] = try b.expand(config.player_radius, allocator);
+        }
         
         const bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds);
         const max_stack_size = @max(config.min_stack_size, config.stack_size_multiplier * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.len))))) + config.stack_size_padding);
@@ -54,10 +64,22 @@ pub const World = struct {
         var stack = std.ArrayListUnmanaged(u32){};
         try stack.ensureTotalCapacity(allocator, max_stack_size);
         
-        return World{ .bvh_tree = bvh_tree, .stack = stack, .allocator = allocator };
+        return World{ 
+            .bvh_tree = bvh_tree, 
+            .stack = stack, 
+            .allocator = allocator,
+            .brushes = brushes,
+        };
     }
     
     pub fn deinit(self: *World) void {
+        // Free expanded brush plane data
+        for (self.brushes) |b| {
+            self.allocator.free(b.plane_data.normals);
+            self.allocator.free(b.plane_data.distances);
+        }
+        self.allocator.free(self.brushes);
+        
         self.bvh_tree.deinit();
         self.stack.deinit(self.allocator);
     }
@@ -127,36 +149,27 @@ pub fn Physics(comptime config: Config) type {
         state: State = .{},
         
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
-            // Apply gravity
+            // Apply forces
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
-            
-            // Handle jumping
             if (jump and self.state.on_ground) {
                 self.state.vel.data[1] = config.jump_velocity;
                 self.state.jump_timer = config.jump_sound_duration;
                 self.state.jump_active = true;
             }
             
-            // Apply movement forces
             self.accelerate(wish_dir, dt);
             if (self.state.on_ground) self.friction(dt);
             
-            // Move and detect ground in one unified step
+            // Move and handle collision
             const move_result = self.move(world, self.state.pos, Vec3.scale(self.state.vel, dt));
             self.state.pos = move_result.pos;
             
-            // Update ground state and handle collision response
+            // Update state from collision
             if (move_result.hit) |hit| {
-                // Check if we hit ground (upward-facing surface)
                 self.state.on_ground = hit.normal.data[1] > config.slope_limit;
-                
-                // Reflect velocity off surface
                 const into_surface = Vec3.dot(self.state.vel, hit.normal);
-                if (into_surface < 0) {
-                    self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
-                }
+                if (into_surface < 0) self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
             } else {
-                // No collision - we're in the air
                 self.state.on_ground = false;
             }
         }
@@ -187,13 +200,13 @@ pub fn Physics(comptime config: Config) type {
         
         fn friction(self: *Self, dt: f32) void {
             const speed = @sqrt(self.state.vel.data[0] * self.state.vel.data[0] + self.state.vel.data[2] * self.state.vel.data[2]);
-            if (speed > config.friction_threshold) {
+            if (speed <= config.friction_threshold) {
+                self.state.vel.data[0] = 0;
+                self.state.vel.data[2] = 0;
+            } else {
                 const factor = @max(0, speed - speed * config.friction * dt) / speed;
                 self.state.vel.data[0] *= factor;
                 self.state.vel.data[2] *= factor;
-            } else {
-                self.state.vel.data[0] = 0;
-                self.state.vel.data[2] = 0;
             }
         }
         
@@ -209,11 +222,10 @@ pub fn Physics(comptime config: Config) type {
                 const move_length = Vec3.length(vel);
                 if (move_length < config.epsilon) break;
                 
-                const ray_dir = Vec3.normalize(vel);
-                if (world.raycast(pos, ray_dir, move_length)) |hit| {
+                if (world.raycast(pos, Vec3.normalize(vel), move_length)) |hit| {
                     if (first_hit == null) first_hit = hit;
                     
-                    pos = Vec3.add(pos, Vec3.scale(ray_dir, @max(0, hit.distance - config.margin)));
+                    pos = Vec3.add(pos, Vec3.scale(Vec3.normalize(vel), @max(0, hit.distance - config.margin)));
                     
                     const into_surface = Vec3.dot(vel, hit.normal);
                     if (into_surface >= 0) break;
@@ -221,8 +233,7 @@ pub fn Physics(comptime config: Config) type {
                     vel = Vec3.scale(Vec3.sub(vel, Vec3.scale(hit.normal, into_surface)), 
                                    config.slide_damping - (@as(f32, @floatFromInt(bump)) * config.slide_damping_step));
                 } else {
-                    pos = Vec3.add(pos, vel);
-                    break;
+                    return .{ .pos = Vec3.add(pos, vel), .hit = first_hit };
                 }
             }
             
