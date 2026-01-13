@@ -56,16 +56,15 @@ pub const World = struct {
         var best_collision: ?brush.CollisionResult = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        // Use BVH config for stack size
-        var stack: [64]u32 = undefined;
-        var stack_ptr: u32 = 1;
-        stack[0] = 0;
+        var stack = std.ArrayListUnmanaged(u32){};
+        defer stack.deinit(self.allocator);
+        stack.append(self.allocator, 0) catch return null;
         
-        while (stack_ptr > 0) {
-            stack_ptr -= 1;
-            const node_idx = stack[stack_ptr];
+        while (stack.items.len > 0) {
+            const node_idx = stack.items[stack.items.len - 1];
+            stack.items.len -= 1;
             
-            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
+            if (node_idx >= @as(u32, @intCast(self.bvh_tree.nodes.items.len))) continue;
             const node = self.bvh_tree.nodes.items[node_idx];
             
             if (!node.bounds().intersects(capsule_bounds)) continue;
@@ -85,13 +84,11 @@ pub const World = struct {
                 const left_child = node.left();
                 const right_child = left_child + 1;
                 
-                if (right_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
-                    stack[stack_ptr] = right_child;
-                    stack_ptr += 1;
+                if (right_child < @as(u32, @intCast(self.bvh_tree.nodes.items.len))) {
+                    stack.append(self.allocator, right_child) catch continue;
                 }
-                if (left_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
-                    stack[stack_ptr] = left_child;
-                    stack_ptr += 1;
+                if (left_child < @as(u32, @intCast(self.bvh_tree.nodes.items.len))) {
+                    stack.append(self.allocator, left_child) catch continue;
                 }
             }
         }
@@ -199,7 +196,7 @@ pub fn Physics(comptime config: Config) type {
             if (self.state.jump_active and self.state.jump_timer > 0) {
                 const t = 1.0 - self.state.jump_timer / config.jump_sound_duration;
                 self.state.jump_timer -= 1.0 / sample_rate;
-                const sample = @sin((config.jump_sound_duration - self.state.jump_timer) * 500.0 * 3.14159265359) * @exp(-t * 8.0) * 0.3;
+                const sample = @sin((config.jump_sound_duration - self.state.jump_timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
                 if (self.state.jump_timer <= 0) self.state.jump_active = false;
                 return sample;
             }

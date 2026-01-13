@@ -93,7 +93,7 @@ const Game = struct {
         const slope_width = 30.0;
         const slope_height = 20.0;
         const slope_center = Vec3.new(0, 0, 20.0);
-        const slope_angle = 46.0 * (3.14159265359 / 180.0);
+        const slope_angle = 46.0 * (std.math.pi / 180.0);
         
         const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
         const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);

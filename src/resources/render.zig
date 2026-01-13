@@ -255,8 +255,8 @@ pub fn Renderer(comptime config: Config) type {
                 });
             }
             
-            // Use saturating cast to prevent overflow
-            self.vertex_count = std.math.cast(u32, self.mesh_builder.indices.items.len) orelse std.math.maxInt(u32);
+            // Return error if index count is too large for u32
+            self.vertex_count = std.math.cast(u32, self.mesh_builder.indices.items.len) orelse return error.TooManyIndices;
         }
         
         pub fn render(self: *const Self, view: Mat4) void {
