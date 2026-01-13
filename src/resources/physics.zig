@@ -69,13 +69,13 @@ pub const World = struct {
         self.traversal_stack.deinit(self.allocator);
     }
     
-    pub fn collide(self: *const World, capsule: brush.Capsule, brush_config: brush.Config) ?brush.CollisionResult {
+    pub fn collide(self: *World, capsule: brush.Capsule, brush_config: brush.Config) ?brush.CollisionResult {
         const capsule_bounds = capsule.bounds();
         var best_collision: ?brush.CollisionResult = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        // Use pre-allocated stack - need to cast away const for mutation
-        var stack = @constCast(&self.traversal_stack);
+        // Use pre-allocated stack
+        var stack = &self.traversal_stack;
         stack.clearRetainingCapacity();
         stack.appendAssumeCapacity(0);
         
@@ -191,7 +191,7 @@ pub fn Physics(comptime config: Config) type {
             self.state.mdy = 0;
         }
         
-        pub fn update(self: *Self, collision_world: *const World, dt: f32) void {
+        pub fn update(self: *Self, collision_world: *World, dt: f32) void {
             // Ground check and physics
             self.state.on_ground = self.isOnGround(collision_world, self.state.pos);
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
@@ -277,7 +277,7 @@ pub fn Physics(comptime config: Config) type {
             }
         }
         
-        fn isOnGround(self: *Self, world_collision: *const World, pos: Vec3) bool {
+        fn isOnGround(self: *Self, world_collision: *World, pos: Vec3) bool {
             const test_pos = Vec3.new(pos.data[0], pos.data[1] - config.ground_snap, pos.data[2]);
             const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
             if (world_collision.collide(capsule, self.brush_config)) |hit_result| {
@@ -286,7 +286,7 @@ pub fn Physics(comptime config: Config) type {
             return false;
         }
         
-        pub fn move(self: *Self, world_collision: *const World, start: Vec3, delta: Vec3) Move {
+        pub fn move(self: *Self, world_collision: *World, start: Vec3, delta: Vec3) Move {
             if (Vec3.length(delta) < config.epsilon) return .{ .pos = start };
             
             // Try direct movement
@@ -301,7 +301,7 @@ pub fn Physics(comptime config: Config) type {
         
         const TraceResult = struct { end_pos: Vec3, hit: ?brush.CollisionResult, time: f32 };
         
-        fn trace(self: *Self, world_collision: *const World, start: Vec3, delta: Vec3) TraceResult {
+        fn trace(self: *Self, world_collision: *World, start: Vec3, delta: Vec3) TraceResult {
             const move_length = Vec3.length(delta);
             if (move_length < config.epsilon) return .{ .end_pos = start, .hit = null, .time = 1.0 };
             
@@ -329,7 +329,7 @@ pub fn Physics(comptime config: Config) type {
             return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .hit = hit, .time = best_time };
         }
         
-        fn slide(self: *Self, world_collision: *const World, start: Vec3, velocity: Vec3) Move {
+        fn slide(self: *Self, world_collision: *World, start: Vec3, velocity: Vec3) Move {
             var pos = start;
             var vel = velocity;
             var remaining_time: f32 = 1.0;
@@ -367,7 +367,7 @@ pub fn Physics(comptime config: Config) type {
             return .{ .pos = pos, .hit = first_hit };
         }
         
-        fn binarySearch(self: *Self, world_collision: *const World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
+        fn binarySearch(self: *Self, world_collision: *World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
             var l = low;
             var h = high;
             for (0..config.binary_search_iterations) |_| {
