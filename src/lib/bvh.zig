@@ -237,7 +237,7 @@ pub fn BVH(comptime T: type) type {
                     const left_tree_idx = tree_node.first;
                     const right_tree_idx = left_tree_idx + 1;
                     
-                    const left_bf_idx = write_idx + (queue.items.len - queue_head) + 1;
+                    const left_bf_idx = write_idx + @as(u32, @intCast(queue.items.len - queue_head)) + 1;
                     nodes[write_idx].first = left_bf_idx;
                     
                     if (left_tree_idx < tree_nodes.len) {

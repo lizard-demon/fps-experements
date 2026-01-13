@@ -46,14 +46,13 @@ pub const World = struct {
     traversal_stack: std.ArrayListUnmanaged(u32),
     
     pub fn init(brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
+        if (brushes.len == 0) return error.NoBrushes;
+        
         const bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds);
         
         // Pre-allocate traversal stack based on BVH depth
         // Maximum stack size is roughly 2 * log2(node_count) for balanced tree
-        const max_stack_size = if (bvh_tree.nodes.items.len > 0) 
-            @max(32, 2 * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.items.len))))) + 8)
-        else 
-            32;
+        const max_stack_size = @max(32, 2 * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.items.len))))) + 8);
         
         var traversal_stack = std.ArrayListUnmanaged(u32){};
         try traversal_stack.ensureTotalCapacity(allocator, max_stack_size);
