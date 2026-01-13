@@ -23,10 +23,6 @@ pub const Config = struct {
     slide_damping_step: f32 = 0.05,
     max_slide_iterations: u32 = 3,
     
-    // Hull dimensions (kept for potential future use)
-    standing_height: f32 = 0.7,
-    standing_radius: f32 = 0.3,
-    
     // Audio
     jump_sound_duration: f32 = 0.15,
     
@@ -55,43 +51,6 @@ pub const World = struct {
     pub fn deinit(self: *World) void {
         self.bvh_tree.deinit();
         self.stack.deinit(self.allocator);
-    }
-    
-    pub fn collide(self: *World, capsule: brush.Capsule, brush_config: brush.Config) ?brush.CollisionResult {
-        const capsule_bounds = capsule.bounds();
-        var best_collision: ?brush.CollisionResult = null;
-        var best_distance: f32 = -std.math.floatMax(f32);
-        
-        self.stack.clearRetainingCapacity();
-        self.stack.appendAssumeCapacity(0);
-        
-        while (self.stack.items.len > 0) {
-            const node_idx = self.stack.items[self.stack.items.len - 1];
-            self.stack.items.len -= 1;
-            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
-            
-            const node = self.bvh_tree.nodes.items[node_idx];
-            if (!node.bounds.intersects(capsule_bounds)) continue;
-            
-            if (node.node_type == .leaf) {
-                const end_idx = @min(node.first + node.count, self.bvh_tree.indices.items.len);
-                for (node.first..end_idx) |i| {
-                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule, brush_config)) |collision| {
-                        if (collision.distance > best_distance) {
-                            best_distance = collision.distance;
-                            best_collision = collision;
-                            if (collision.distance > 0) return collision;
-                        }
-                    }
-                }
-            } else {
-                const left = node.first;
-                if (left + 1 < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left + 1);
-                if (left < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left);
-            }
-        }
-        
-        return best_collision;
     }
     
     pub fn raycast(self: *World, ray_start: Vec3, ray_dir: Vec3, max_distance: f32) ?brush.CollisionResult {
@@ -156,8 +115,11 @@ pub fn Physics(comptime config: Config) type {
         state: State = .{},
         
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
-            self.state.on_ground = world.raycast(self.state.pos, Vec3.new(0, -1, 0), config.ground_check_distance) != null and 
-                                   world.raycast(self.state.pos, Vec3.new(0, -1, 0), config.ground_check_distance).?.normal.data[1] > config.slope_limit;
+            if (world.raycast(self.state.pos, Vec3.new(0, -1, 0), config.ground_check_distance)) |ground_hit| {
+                self.state.on_ground = ground_hit.normal.data[1] > config.slope_limit;
+            } else {
+                self.state.on_ground = false;
+            }
             
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
             if (jump and self.state.on_ground) {
@@ -167,7 +129,7 @@ pub fn Physics(comptime config: Config) type {
             }
             
             self.accelerate(wish_dir, dt);
-            if (self.state.on_ground) self.applyFriction(dt);
+            if (self.state.on_ground) self.friction(dt);
             
             const move_result = self.move(world, self.state.pos, Vec3.scale(self.state.vel, dt));
             self.state.pos = move_result.pos;
@@ -202,7 +164,7 @@ pub fn Physics(comptime config: Config) type {
             self.state.vel.data[2] += wish.data[2] * accel;
         }
         
-        fn applyFriction(self: *Self, dt: f32) void {
+        fn friction(self: *Self, dt: f32) void {
             const speed = @sqrt(self.state.vel.data[0] * self.state.vel.data[0] + self.state.vel.data[2] * self.state.vel.data[2]);
             if (speed > config.friction_threshold) {
                 const factor = @max(0, speed - speed * config.friction * dt) / speed;
