@@ -4,9 +4,10 @@ const sg = sokol.gfx;
 const simgui = sokol.imgui;
 const ig = @import("cimgui");
 
-const math = @import("../lib/math.zig");
-const shader = @import("../shader/cube.glsl.zig");
+const math = @import("math");
+const shader = @import("shader");
 const bvh = @import("../lib/bvh.zig");
+const brush = @import("../lib/brush.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
@@ -35,7 +36,7 @@ pub const Config = struct {
 };
 
 pub fn Renderer(comptime config: Config) type {
-    return struct {
+   return struct {
         const Self = @This();
         
         // Vertex format for rendering
@@ -56,18 +57,18 @@ pub fn Renderer(comptime config: Config) type {
                 self.indices.deinit(self.allocator); 
             }
             
-            fn addBrush(self: *MeshBuilder, brush: bvh.Brush, color: [4]f32) !void {
+            fn addBrush(self: *MeshBuilder, b: brush.Brush, color: [4]f32) !void {
                 var hull_vertices = std.ArrayListUnmanaged(Vec3){};
                 defer hull_vertices.deinit(self.allocator);
                 
-                for (0..brush.planes.len) |i| {
-                    for (i + 1..brush.planes.len) |j| {
-                        for (j + 1..brush.planes.len) |k| {
+                for (0..b.planes.len) |i| {
+                    for (i + 1..b.planes.len) |j| {
+                        for (j + 1..b.planes.len) |k| {
                             // intersect three planes
                             const intersection = blk: {
-                                const p1 = brush.planes[i];
-                                const p2 = brush.planes[j];
-                                const p3 = brush.planes[k];
+                                const p1 = b.planes[i];
+                                const p2 = b.planes[j];
+                                const p3 = b.planes[k];
                                 const n1 = p1.normal;
                                 const n2 = p2.normal;
                                 const n3 = p3.normal;
@@ -85,7 +86,7 @@ pub fn Renderer(comptime config: Config) type {
                             if (intersection) |vertex| {
                                 // check if vertex is inside brush
                                 const inside_brush = blk: {
-                                    for (brush.planes) |plane| if (plane.distanceToPoint(vertex) > 0.001) break :blk false;
+                                    for (b.planes) |plane| if (plane.distanceToPoint(vertex) > 0.001) break :blk false;
                                     break :blk true;
                                 };
                                 
@@ -205,7 +206,7 @@ pub fn Renderer(comptime config: Config) type {
             layout.attrs[1].format = .FLOAT4;
             
             self.pipeline = sg.makePipeline(.{ 
-                .shader = sg.makeShader(shader.cubeShaderDesc(sg.queryBackend())), 
+                .shader = sg.makeShader(shader.shaderShaderDesc(sg.queryBackend())), 
                 .layout = layout, 
                 .index_type = .UINT16, 
                 .depth = .{ .compare = .LESS_EQUAL, .write_enabled = true }, 
@@ -225,10 +226,10 @@ pub fn Renderer(comptime config: Config) type {
             };
         }
         
-        pub fn buildWorldMesh(self: *Self, brushes: []const bvh.Brush) !void {
+        pub fn buildWorldMesh(self: *Self, brushes: []const brush.Brush) !void {
             // Build visual representation using brushes for rendering
-            for (brushes) |brush| {
-                self.mesh_builder.addBrush(brush, config.brush_color) catch continue;
+            for (brushes) |b| {
+                self.mesh_builder.addBrush(b, config.brush_color) catch continue;
             }
             
             try self.buildBuffers();

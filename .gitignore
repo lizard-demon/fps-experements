@@ -13,8 +13,7 @@ zig-cache/
 *.pdb
 
 # Generated shader files
-src/shader/*.glsl.zig
-src/shaders/*.glsl.zig
+shader/*.glsl.zig
 
 # IDE and editor files
 .vscode/

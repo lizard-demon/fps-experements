@@ -1,4 +1,3 @@
-// Math utilities for TinyCode FPS
 const std = @import("std");
 
 pub const Vec3 = struct {

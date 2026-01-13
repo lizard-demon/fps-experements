@@ -6,8 +6,9 @@ const saudio = sokol.audio;
 const simgui = sokol.imgui;
 const ig = @import("cimgui");
 
-const math = @import("lib/math.zig");
+const math = @import("math");
 const bvh = @import("lib/bvh.zig");
+const brush = @import("lib/brush.zig");
 const physics_mod = @import("resources/physics.zig");
 
 const Vec3 = math.Vec3;
@@ -30,8 +31,8 @@ const Game = struct {
     
     // World data
     world: World = undefined,
-    brush_planes: [80]bvh.Plane = undefined,
-    brushes: [8]bvh.Brush = undefined,
+    brush_planes: [80]brush.Plane = undefined,
+    brushes: [8]brush.Brush = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
@@ -68,7 +69,7 @@ const Game = struct {
         if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
         
         const half_size = Vec3.scale(size, 0.5);
-        const planes = [6]bvh.Plane{
+        const planes = [6]brush.Plane{
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -(center.data[0] + half_size.data[0]) },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = center.data[0] - half_size.data[0] },
             .{ .normal = Vec3.new( 0,  1,  0), .distance = -(center.data[1] + half_size.data[1]) },
@@ -97,7 +98,7 @@ const Game = struct {
         const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
         const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
         
-        const planes = [6]bvh.Plane{
+        const planes = [6]brush.Plane{
             .{ .normal = Vec3.new( 0, -1,  0), .distance = 0.0 },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = -slope_width/2 },
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -slope_width/2 },
@@ -125,11 +126,11 @@ const Game = struct {
         };
         
         std.log.info("Created {} brushes", .{brush_count});
-        for (self.brushes[0..brush_count], 0..) |brush, i| {
+        for (self.brushes[0..brush_count], 0..) |b, i| {
             std.log.info("  Brush {}: {} planes, bounds: ({d:.1},{d:.1},{d:.1}) to ({d:.1},{d:.1},{d:.1})", .{
-                i, brush.planes.len,
-                brush.bounds.min.data[0], brush.bounds.min.data[1], brush.bounds.min.data[2],
-                brush.bounds.max.data[0], brush.bounds.max.data[1], brush.bounds.max.data[2]
+                i, b.planes.len,
+                b.bounds.min.data[0], b.bounds.min.data[1], b.bounds.min.data[2],
+                b.bounds.max.data[0], b.bounds.max.data[1], b.bounds.max.data[2]
             });
         }
     }
@@ -137,8 +138,8 @@ const Game = struct {
     fn buildWorldMesh(self: *@This()) !void {
         // Find the actual number of brushes used
         var brush_count: usize = 0;
-        for (self.brushes) |brush| {
-            if (brush.planes.len > 0) brush_count += 1;
+        for (self.brushes) |b| {
+            if (b.planes.len > 0) brush_count += 1;
         }
         try self.renderer.buildWorldMesh(self.brushes[0..brush_count]);
     }

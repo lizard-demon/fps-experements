@@ -1,6 +1,7 @@
 const std = @import("std");
-const math = @import("../lib/math.zig");
+const math = @import("math");
 const bvh = @import("../lib/bvh.zig");
+const brush = @import("../lib/brush.zig");
 
 const Vec3 = math.Vec3;
 
@@ -36,12 +37,12 @@ pub const Config = struct {
 };
 
 pub const World = struct {
-    bvh_tree: bvh.BVH(bvh.Brush),
+    bvh_tree: bvh.BVH(brush.Brush),
     allocator: std.mem.Allocator,
     
-    pub fn init(brushes: []const bvh.Brush, allocator: std.mem.Allocator) !World {
+    pub fn init(brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
         return World{
-            .bvh_tree = try bvh.BVH(bvh.Brush).init(brushes, allocator, bvh.Brush.getBounds),
+            .bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds),
             .allocator = allocator,
         };
     }
@@ -50,9 +51,9 @@ pub const World = struct {
         self.bvh_tree.deinit();
     }
     
-    pub fn check(self: *const World, capsule: bvh.Capsule) ?bvh.CollisionResult {
+    pub fn collide(self: *const World, capsule: brush.Capsule) ?brush.CollisionResult {
         const capsule_bounds = capsule.bounds();
-        var best_collision: ?bvh.CollisionResult = null;
+        var best_collision: ?brush.CollisionResult = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
         // Use BVH config for stack size
@@ -124,7 +125,7 @@ pub fn Physics(comptime config: Config) type {
             jump_active: bool = false,
         };
         
-        pub const Move = struct { pos: Vec3, hit: ?bvh.CollisionResult = null };
+        pub const Move = struct { pos: Vec3, hit: ?brush.CollisionResult = null };
         
         allocator: std.mem.Allocator,
         state: State = .{},
@@ -273,8 +274,8 @@ pub fn Physics(comptime config: Config) type {
         fn isOnGround(self: *Self, world_collision: *const World, pos: Vec3) bool {
             _ = self;
             const test_pos = Vec3.new(pos.data[0], pos.data[1] - config.ground_snap, pos.data[2]);
-            const capsule = bvh.Capsule.fromHull(test_pos, .standing);
-            if (world_collision.check(capsule)) |hit_result| {
+            const capsule = brush.Capsule.fromHull(test_pos, .standing);
+            if (world_collision.collide(capsule)) |hit_result| {
                 return hit_result.normal.data[1] > config.slope_limit;
             }
             return false;
@@ -284,8 +285,8 @@ pub fn Physics(comptime config: Config) type {
             if (Vec3.length(delta) < config.epsilon) return .{ .pos = start };
             
             // Try direct movement
-            const end_capsule = bvh.Capsule.fromHull(Vec3.add(start, delta), .standing);
-            if (world_collision.check(end_capsule) == null) {
+            const end_capsule = brush.Capsule.fromHull(Vec3.add(start, delta), .standing);
+            if (world_collision.collide(end_capsule) == null) {
                 return .{ .pos = Vec3.add(start, delta) };
             }
             
@@ -293,22 +294,22 @@ pub fn Physics(comptime config: Config) type {
             return slide(world_collision, start, delta);
         }
         
-        const TraceResult = struct { end_pos: Vec3, hit: ?bvh.CollisionResult, time: f32 };
+        const TraceResult = struct { end_pos: Vec3, hit: ?brush.CollisionResult, time: f32 };
         
         fn trace(world_collision: *const World, start: Vec3, delta: Vec3) TraceResult {
             const move_length = Vec3.length(delta);
             if (move_length < config.epsilon) return .{ .end_pos = start, .hit = null, .time = 1.0 };
             
             var best_time: f32 = 1.0;
-            var hit: ?bvh.CollisionResult = null;
+            var hit: ?brush.CollisionResult = null;
             
             const samples = @min(config.trace_samples_max, @max(config.trace_samples_min, @as(u32, @intFromFloat(move_length * config.trace_samples_multiplier))));
             for (0..samples) |i| {
                 const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
                 const test_pos = Vec3.add(start, Vec3.scale(delta, t));
-                const capsule = bvh.Capsule.fromHull(test_pos, .standing);
+                const capsule = brush.Capsule.fromHull(test_pos, .standing);
                 
-                if (world_collision.check(capsule)) |hit_result| {
+                if (world_collision.collide(capsule)) |hit_result| {
                     best_time = binarySearch(world_collision, start, delta, 
                                        if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
                     hit = hit_result;
@@ -327,7 +328,7 @@ pub fn Physics(comptime config: Config) type {
             var pos = start;
             var vel = velocity;
             var remaining_time: f32 = 1.0;
-            var first_hit: ?bvh.CollisionResult = null;
+            var first_hit: ?brush.CollisionResult = null;
             var planes: [config.max_slide_iterations]Vec3 = undefined;
             var num_planes: u32 = 0;
             
@@ -367,9 +368,9 @@ pub fn Physics(comptime config: Config) type {
             for (0..config.binary_search_iterations) |_| {
                 const mid = (l + h) * 0.5;
                 const test_pos = Vec3.add(start, Vec3.scale(delta, mid));
-                const capsule = bvh.Capsule.fromHull(test_pos, .standing);
+                const capsule = brush.Capsule.fromHull(test_pos, .standing);
                 
-                if (world_collision.check(capsule) != null) {
+                if (world_collision.collide(capsule) != null) {
                     h = mid;
                 } else {
                     l = mid;

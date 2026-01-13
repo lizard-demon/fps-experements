@@ -1,78 +1,15 @@
 const std = @import("std");
-const math = @import("math.zig");
+const math = @import("math");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 
-// Configuration and core types
+// Configuration for BVH construction
 const Config = struct {
     traversal_cost: f32 = 0.3,
     max_leaf_size: u32 = 4,
     epsilon: f32 = 1e-6,
     split_candidates: u32 = 8,
     max_stack_depth: u32 = 64,
-};
-
-pub const HullType = enum { point, standing };
-pub const CollisionResult = struct { normal: Vec3, distance: f32 };
-
-pub const Capsule = struct {
-    start: Vec3, end: Vec3, radius: f32,
-    
-    pub fn fromHull(pos: Vec3, hull_type: HullType) Capsule {
-        return switch (hull_type) {
-            .point => .{ .start = pos, .end = pos, .radius = 0.0 },
-            .standing => .{ 
-                .start = Vec3.add(pos, Vec3.new(0, -0.7, 0)), 
-                .end = Vec3.add(pos, Vec3.new(0, 0.7, 0)), 
-                .radius = 0.3 
-            },
-        };
-    }
-    
-    pub fn center(self: Capsule) Vec3 {
-        return Vec3.scale(Vec3.add(self.start, self.end), 0.5);
-    }
-    
-    pub fn bounds(self: Capsule) AABB {
-        const r = Vec3.new(self.radius, self.radius, self.radius);
-        return AABB{
-            .min = Vec3.sub(Vec3.min(self.start, self.end), r),
-            .max = Vec3.add(Vec3.max(self.start, self.end), r),
-        };
-    }
-};
-
-pub const Plane = struct {
-    normal: Vec3, distance: f32,
-    
-    pub fn distanceToPoint(self: Plane, point: Vec3) f32 { 
-        return Vec3.dot(self.normal, point) + self.distance; 
-    }
-};
-
-pub const Brush = struct {
-    planes: []const Plane, 
-    bounds: AABB,
-    
-    pub fn checkCapsule(self: Brush, capsule: Capsule) ?CollisionResult {
-        var closest_normal: ?Vec3 = null;
-        var closest_distance: f32 = std.math.floatMax(f32);
-        
-        for (self.planes) |plane| {
-            const distance = plane.distanceToPoint(capsule.center()) - capsule.radius;
-            if (distance > 0.001) return null;
-            if (distance > -closest_distance) {
-                closest_distance = -distance;
-                closest_normal = plane.normal;
-            }
-        }
-        
-        return if (closest_normal) |normal| 
-            CollisionResult{ .normal = normal, .distance = closest_distance } 
-        else null;
-    }
-    
-    pub fn getBounds(self: Brush) AABB { return self.bounds; }
 };
 
 // BVH Node - packed for cache efficiency
@@ -315,67 +252,3 @@ pub fn BVH(comptime T: type) type {
         }
     };
 }
-// High-level collision world interface
-pub const CollisionWorld = struct {
-    bvh_tree: BVH(Brush),
-    allocator: std.mem.Allocator,
-    
-    pub fn init(brushes: []const Brush, allocator: std.mem.Allocator) !CollisionWorld {
-        return CollisionWorld{
-            .bvh_tree = try BVH(Brush).init(brushes, allocator, Brush.getBounds),
-            .allocator = allocator,
-        };
-    }
-    
-    pub fn deinit(self: *CollisionWorld) void {
-        self.bvh_tree.deinit();
-    }
-    
-    pub fn check(self: *const CollisionWorld, capsule: Capsule) ?CollisionResult {
-        const capsule_bounds = capsule.bounds();
-        var best_collision: ?CollisionResult = null;
-        var best_distance: f32 = -std.math.floatMax(f32);
-        
-        const config = Config{};
-        var stack: [config.max_stack_depth]u32 = undefined;
-        var stack_ptr: u32 = 1;
-        stack[0] = 0;
-        
-        while (stack_ptr > 0) {
-            stack_ptr -= 1;
-            const node_idx = stack[stack_ptr];
-            
-            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
-            const node = self.bvh_tree.nodes.items[node_idx];
-            
-            if (!node.bounds().intersects(capsule_bounds)) continue;
-            
-            if (node.isLeaf()) {
-                const end_idx = @min(node.first + node.count(), self.bvh_tree.indices.items.len);
-                for (node.first..end_idx) |i| {
-                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule)) |collision| {
-                        if (collision.distance > best_distance) {
-                            best_distance = collision.distance;
-                            best_collision = collision;
-                            if (collision.distance > 0) return collision;
-                        }
-                    }
-                }
-            } else {
-                const left_child = node.left();
-                const right_child = left_child + 1;
-                
-                if (right_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
-                    stack[stack_ptr] = right_child;
-                    stack_ptr += 1;
-                }
-                if (left_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
-                    stack[stack_ptr] = left_child;
-                    stack_ptr += 1;
-                }
-            }
-        }
-        
-        return best_collision;
-    }
-};

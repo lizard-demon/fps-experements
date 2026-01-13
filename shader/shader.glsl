@@ -1,4 +1,4 @@
-@header const math = @import("../lib/math.zig")
+@header const math = @import("math")
 @ctype mat4 math.Mat4
 
 @vs vs
@@ -34,4 +34,4 @@ void main() {
 }
 @end
 
-@program cube vs fs
+@program shader vs fs
