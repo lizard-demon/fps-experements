@@ -48,7 +48,7 @@ const Game = struct {
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.physics = Physics.init(allocator);
+        self.physics = Physics{};
         self.renderer = Renderer.init(allocator);
         
         var plane_idx: usize = 0;
@@ -159,7 +159,6 @@ const Game = struct {
     fn deinit(self: *@This()) void {
         self.world.deinit();
         self.renderer.deinit();
-        self.physics.deinit();
     }
 };
 

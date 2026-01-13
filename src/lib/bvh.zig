@@ -14,25 +14,13 @@ const Config = struct {
 };
 
 // BVH Node - packed for cache efficiency
+const NodeType = enum(u2) { x_axis = 0, y_axis = 1, z_axis = 2, leaf = 3 };
+
 const Node = packed struct {
-    first: u32, 
-    count_and_axis: u32, // count (30 bits) + axis (2 bits)
-    min_x: f32, min_y: f32, min_z: f32, 
-    max_x: f32, max_y: f32, max_z: f32,
-    
-    pub fn bounds(self: Node) AABB { 
-        return AABB{ 
-            .min = Vec3.new(self.min_x, self.min_y, self.min_z), 
-            .max = Vec3.new(self.max_x, self.max_y, self.max_z) 
-        }; 
-    }
-    pub fn isLeaf(self: Node) bool { return (self.count_and_axis & 0x3) == 3; }
-    pub fn left(self: Node) u32 { return self.first; }
-    pub fn count(self: Node) u32 { return self.count_and_axis >> 2; }
-    pub fn axis(self: Node) u32 { return self.count_and_axis & 0x3; }
-    fn setCountAndAxis(count_val: u32, axis_val: u32) u32 {
-        return (count_val << 2) | (axis_val & 0x3);
-    }
+    first: u32,
+    count: u30,
+    node_type: NodeType,
+    bounds: AABB,
 };
 
 // Generic BVH implementation
@@ -79,15 +67,15 @@ pub fn BVH(comptime T: type) type {
                 if (node_idx >= self.nodes.items.len) continue;
                 
                 const node = self.nodes.items[node_idx];
-                if (!node.bounds().intersects(query_bounds)) continue;
+                if (!node.bounds.intersects(query_bounds)) continue;
                 
-                if (node.isLeaf()) {
-                    const end_idx = @min(node.first + node.count(), self.indices.items.len);
+                if (node.node_type == .leaf) {
+                    const end_idx = @min(node.first + node.count, self.indices.items.len);
                     for (node.first..end_idx) |i| {
                         if (test_fn(self.items[self.indices.items[i]])) return true;
                     }
                 } else {
-                    const left_child = node.left();
+                    const left_child = node.first;
                     const right_child = left_child + 1;
                     
                     if (right_child < self.nodes.items.len and stack_ptr < stack.len) {
@@ -107,7 +95,7 @@ pub fn BVH(comptime T: type) type {
             var nodes = std.ArrayListUnmanaged(Node){};
             defer nodes.deinit(self.allocator);
             _ = try self.buildRecursive(0, @intCast(self.items.len), &nodes, bounds_fn);
-            try self.layoutBreadthFirst(nodes.items);
+            try self.flatten(nodes.items);
         }
         
         fn buildRecursive(self: *Self, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node), bounds_fn: fn(T) AABB) !u32 {
@@ -119,17 +107,17 @@ pub fn BVH(comptime T: type) type {
             
             try nodes.append(self.allocator, Node{
                 .first = start, 
-                .count_and_axis = Node.setCountAndAxis(count, 3),
-                .min_x = bounds.min.data[0], .min_y = bounds.min.data[1], .min_z = bounds.min.data[2],
-                .max_x = bounds.max.data[0], .max_y = bounds.max.data[1], .max_z = bounds.max.data[2],
+                .count = @intCast(count),
+                .node_type = .leaf,
+                .bounds = bounds,
             });
             
             if (count <= config.max_leaf_size) return node_idx;
             
-            const split = self.findBestSplit(start, count, bounds, bounds_fn);
-            if (split.cost >= @as(f32, @floatFromInt(count))) return node_idx;
+            const best_split = self.split(start, count, bounds, bounds_fn);
+            if (best_split.cost >= @as(f32, @floatFromInt(count))) return node_idx;
             
-            const split_idx = self.partition(start, count, split.axis, split.pos, bounds_fn);
+            const split_idx = self.partition(start, count, best_split.axis, best_split.pos, bounds_fn);
             const left_count = split_idx - start;
             const right_count = (start + count) - split_idx;
             if (left_count == 0 or right_count == 0) return node_idx;
@@ -138,13 +126,14 @@ pub fn BVH(comptime T: type) type {
             _ = try self.buildRecursive(split_idx, right_count, nodes, bounds_fn);
             
             nodes.items[node_idx].first = left_child;
-            nodes.items[node_idx].count_and_axis = Node.setCountAndAxis(0, split.axis);
+            nodes.items[node_idx].count = 0;
+            nodes.items[node_idx].node_type = @enumFromInt(best_split.axis);
             return node_idx;
         }
         
         const Split = struct { axis: u32, pos: f32, cost: f32 };
         
-        fn findBestSplit(self: *Self, start: u32, count: u32, bounds: AABB, bounds_fn: fn(T) AABB) Split {
+        fn split(self: *Self, start: u32, count: u32, bounds: AABB, bounds_fn: fn(T) AABB) Split {
             var best = Split{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
             const parent_area = bounds.surface_area();
             if (parent_area <= 0) return best;
@@ -212,7 +201,7 @@ pub fn BVH(comptime T: type) type {
             return left;
         }
         
-        fn layoutBreadthFirst(self: *Self, tree_nodes: []Node) !void {
+        fn flatten(self: *Self, tree_nodes: []Node) !void {
             if (tree_nodes.len == 0) return;
             
             const nodes = try self.allocator.alloc(Node, tree_nodes.len);
@@ -233,7 +222,7 @@ pub fn BVH(comptime T: type) type {
                 const tree_node = tree_nodes[tree_idx];
                 nodes[write_idx] = tree_node;
                 
-                if (!tree_node.isLeaf()) {
+                if (tree_node.node_type != .leaf) {
                     const left_tree_idx = tree_node.first;
                     const right_tree_idx = left_tree_idx + 1;
                     

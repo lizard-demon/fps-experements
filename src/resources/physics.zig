@@ -71,10 +71,10 @@ pub const World = struct {
             if (node_idx >= self.bvh_tree.nodes.items.len) continue;
             
             const node = self.bvh_tree.nodes.items[node_idx];
-            if (!node.bounds().intersects(capsule_bounds)) continue;
+            if (!node.bounds.intersects(capsule_bounds)) continue;
             
-            if (node.isLeaf()) {
-                const end_idx = @min(node.first + node.count(), self.bvh_tree.indices.items.len);
+            if (node.node_type == .leaf) {
+                const end_idx = @min(node.first + node.count, self.bvh_tree.indices.items.len);
                 for (node.first..end_idx) |i| {
                     if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule, brush_config)) |collision| {
                         if (collision.distance > best_distance) {
@@ -85,7 +85,7 @@ pub const World = struct {
                     }
                 }
             } else {
-                const left = node.left();
+                const left = node.first;
                 if (left + 1 < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left + 1);
                 if (left < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left);
             }
@@ -114,10 +114,10 @@ pub const World = struct {
             if (node_idx >= self.bvh_tree.nodes.items.len) continue;
             
             const node = self.bvh_tree.nodes.items[node_idx];
-            if (!node.bounds().intersects(ray_bounds)) continue;
+            if (!node.bounds.intersects(ray_bounds)) continue;
             
-            if (node.isLeaf()) {
-                const end_idx = @min(node.first + node.count(), self.bvh_tree.indices.items.len);
+            if (node.node_type == .leaf) {
+                const end_idx = @min(node.first + node.count, self.bvh_tree.indices.items.len);
                 for (node.first..end_idx) |i| {
                     if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].rayIntersect(ray_start, ray_dir, best_distance)) |hit| {
                         if (hit.distance < best_distance) {
@@ -127,7 +127,7 @@ pub const World = struct {
                     }
                 }
             } else {
-                const left = node.left();
+                const left = node.first;
                 if (left + 1 < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left + 1);
                 if (left < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left);
             }
@@ -155,22 +155,15 @@ pub fn Physics(comptime config: Config) type {
         
         state: State = .{},
         
-        pub fn init(allocator: std.mem.Allocator) Self {
-            _ = allocator;
-            return Self{};
-        }
-        
-        pub fn deinit(self: *Self) void {
-            _ = self;
-        }
-        
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
-            self.state.on_ground = self.isOnGround(world, self.state.pos);
+            self.state.on_ground = world.raycast(self.state.pos, Vec3.new(0, -1, 0), config.ground_check_distance) != null and 
+                                   world.raycast(self.state.pos, Vec3.new(0, -1, 0), config.ground_check_distance).?.normal.data[1] > config.slope_limit;
+            
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
-            if (jump and self.state.on_ground) { 
-                self.state.vel.data[1] = config.jump_velocity; 
-                self.state.jump_timer = config.jump_sound_duration; 
-                self.state.jump_active = true; 
+            if (jump and self.state.on_ground) {
+                self.state.vel.data[1] = config.jump_velocity;
+                self.state.jump_timer = config.jump_sound_duration;
+                self.state.jump_active = true;
             }
             
             self.accelerate(wish_dir, dt);
@@ -181,9 +174,7 @@ pub fn Physics(comptime config: Config) type {
             
             if (move_result.hit) |hit| {
                 const into_surface = Vec3.dot(self.state.vel, hit.normal);
-                if (into_surface < 0) {
-                    self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
-                }
+                if (into_surface < 0) self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
             }
         }
         
@@ -215,23 +206,12 @@ pub fn Physics(comptime config: Config) type {
             const speed = @sqrt(self.state.vel.data[0] * self.state.vel.data[0] + self.state.vel.data[2] * self.state.vel.data[2]);
             if (speed > config.friction_threshold) {
                 const factor = @max(0, speed - speed * config.friction * dt) / speed;
-                self.state.vel.data[0] *= factor; 
+                self.state.vel.data[0] *= factor;
                 self.state.vel.data[2] *= factor;
-            } else { 
-                self.state.vel.data[0] = 0; 
-                self.state.vel.data[2] = 0; 
+            } else {
+                self.state.vel.data[0] = 0;
+                self.state.vel.data[2] = 0;
             }
-        }
-        
-        fn isOnGround(self: *Self, world: *World, pos: Vec3) bool {
-            _ = self;
-            const ray_start = pos;
-            const ray_dir = Vec3.new(0, -1, 0);
-            
-            if (world.raycast(ray_start, ray_dir, config.ground_check_distance)) |hit| {
-                return hit.normal.data[1] > config.slope_limit;
-            }
-            return false;
         }
         
         pub fn move(self: *Self, world: *World, start: Vec3, delta: Vec3) Move {
@@ -250,18 +230,14 @@ pub fn Physics(comptime config: Config) type {
                 if (world.raycast(pos, ray_dir, move_length)) |hit| {
                     if (first_hit == null) first_hit = hit;
                     
-                    // Move to just before collision
-                    const safe_distance = @max(0, hit.distance - config.margin);
-                    pos = Vec3.add(pos, Vec3.scale(ray_dir, safe_distance));
+                    pos = Vec3.add(pos, Vec3.scale(ray_dir, @max(0, hit.distance - config.margin)));
                     
-                    // Slide along surface
                     const into_surface = Vec3.dot(vel, hit.normal);
                     if (into_surface >= 0) break;
                     
-                    vel = Vec3.sub(vel, Vec3.scale(hit.normal, into_surface));
-                    vel = Vec3.scale(vel, config.slide_damping - (@as(f32, @floatFromInt(bump)) * config.slide_damping_step));
+                    vel = Vec3.scale(Vec3.sub(vel, Vec3.scale(hit.normal, into_surface)), 
+                                   config.slide_damping - (@as(f32, @floatFromInt(bump)) * config.slide_damping_step));
                 } else {
-                    // No collision, move freely
                     pos = Vec3.add(pos, vel);
                     break;
                 }

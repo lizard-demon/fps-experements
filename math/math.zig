@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Vec3 = struct {
+pub const Vec3 = packed struct {
     data: @Vector(3, f32),
 
     pub inline fn new(x: f32, y: f32, z: f32) Vec3 {
@@ -55,7 +55,7 @@ pub const Vec3 = struct {
     }
 };
 
-pub const AABB = struct {
+pub const AABB = packed struct {
     min: Vec3,
     max: Vec3,
     
