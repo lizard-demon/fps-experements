@@ -7,54 +7,40 @@ const simgui = sokol.imgui;
 const ig = @import("cimgui");
 
 const math = @import("lib/math.zig");
-const ecs = @import("lib/ecs.zig");
-const collision = @import("resources/collision.zig");
-const mesh = @import("resources/mesh.zig");
-const physics = @import("resources/physics.zig");
-const renderer = @import("resources/render.zig");
-const config = @import("lib/config.zig");
+const bvh = @import("lib/bvh.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
 const AABB = math.AABB;
 
-// Components
-const Transform = physics.Transform;
-const Physics = physics.Physics;
-const Input = physics.Input;
-const Audio = physics.Audio;
+// Module types
+const Physics = @import("resources/physics.zig").Physics(.{});
+const Renderer = @import("resources/render.zig").Renderer(.{});
 
-// Archetype
-const Player = struct { transform: Transform, physics: Physics, input: Input, audio: Audio };
-
-// Registry
-const Registry = struct { players: ecs.List(Player) };
-
-// Resources
-const Resources = struct {
-    delta_time: f32 = 0,
+// Game state
+const Game = struct {
     allocator: std.mem.Allocator,
-    player_entity: ecs.Entity(Player) = undefined,
+    delta_time: f32 = 0,
     
-    // Rendering
-    renderer: renderer.Renderer = undefined,
+    // Systems
+    physics: Physics = undefined,
+    renderer: Renderer = undefined,
     
-    // World - now just holds brush data
-    world: collision.World = undefined,
-    
-    // Static brush storage for complex demo geometry
-    brush_planes: [80]collision.Plane = undefined, // Increased for complex shapes
-    brushes: [8]collision.Brush = undefined,
+    // World data
+    world: bvh.CollisionWorld = undefined,
+    brush_planes: [80]bvh.Plane = undefined,
+    brushes: [8]bvh.Brush = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.renderer = renderer.Renderer.init(allocator);
+        self.physics = Physics.init(allocator);
+        self.renderer = Renderer.init(allocator);
         
         var plane_idx: usize = 0;
         var brush_idx: usize = 0;
         
         // 1. Massive ground platform
-        brush_idx += self.addBoxBrush(&plane_idx, Vec3.new(0, config.World.Geometry.ground_center_y, 0), Vec3.new(config.World.Geometry.ground_size_x, config.World.Geometry.ground_size_y, config.World.Geometry.ground_size_z), brush_idx);
+        brush_idx += self.addBoxBrush(&plane_idx, Vec3.new(0, -2.25, 0), Vec3.new(100.0, 4.5, 100.0), brush_idx);
         
         // 2. Massive slope/mountain
         brush_idx += self.addSlopeBrush(&plane_idx, brush_idx);
@@ -80,7 +66,7 @@ const Resources = struct {
         if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
         
         const half_size = Vec3.scale(size, 0.5);
-        const planes = [6]collision.Plane{
+        const planes = [6]bvh.Plane{
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -(center.data[0] + half_size.data[0]) },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = center.data[0] - half_size.data[0] },
             .{ .normal = Vec3.new( 0,  1,  0), .distance = -(center.data[1] + half_size.data[1]) },
@@ -101,16 +87,16 @@ const Resources = struct {
     fn addSlopeBrush(self: *@This(), plane_idx: *usize, brush_idx: usize) u32 {
         if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
         
-        const slope_width = config.World.Geometry.slope_width;
-        const slope_height = config.World.Geometry.slope_height;
-        const slope_center = Vec3.new(0, 0, config.World.Geometry.slope_center_z);
-        const slope_angle = config.World.Geometry.slope_angle_degrees * config.Math.degrees_to_radians;
+        const slope_width = 30.0;
+        const slope_height = 20.0;
+        const slope_center = Vec3.new(0, 0, 20.0);
+        const slope_angle = 46.0 * (3.14159265359 / 180.0);
         
         const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
         const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
         
-        const planes = [6]collision.Plane{
-            .{ .normal = Vec3.new( 0, -1,  0), .distance = config.World.Geometry.slope_ground_level },
+        const planes = [6]bvh.Plane{
+            .{ .normal = Vec3.new( 0, -1,  0), .distance = 0.0 },
             .{ .normal = Vec3.new(-1,  0,  0), .distance = -slope_width/2 },
             .{ .normal = Vec3.new( 1,  0,  0), .distance = -slope_width/2 },
             .{ .normal = Vec3.new( 0,  0, -1), .distance = slope_center.data[2] - slope_width/2 },
@@ -122,7 +108,7 @@ const Resources = struct {
         self.brushes[brush_idx] = .{ 
             .planes = self.brush_planes[plane_idx.*..plane_idx.* + 6], 
             .bounds = AABB.new(
-                Vec3.new(-slope_width/2, config.World.Geometry.slope_ground_level, slope_center.data[2] - slope_width/2), 
+                Vec3.new(-slope_width/2, 0.0, slope_center.data[2] - slope_width/2), 
                 Vec3.new(slope_width/2, slope_height, slope_center.data[2] + slope_width/2)
             )
         };
@@ -131,7 +117,7 @@ const Resources = struct {
     }
     
     fn initializeWorld(self: *@This(), brush_count: usize) void {
-        self.world = collision.World.init(self.brushes[0..brush_count], self.allocator) catch |err| {
+        self.world = bvh.CollisionWorld.init(self.brushes[0..brush_count], self.allocator) catch |err| {
             std.log.err("Failed to initialize world: {}", .{err});
             return;
         };
@@ -150,56 +136,20 @@ const Resources = struct {
         try self.renderer.buildWorldMesh(self.world.original_brushes);
     }
     
-    fn render(self: *const @This(), view: Mat4) void {
-        self.renderer.render(view);
-    }
-    
     fn deinit(self: *@This()) void {
         self.world.deinit();
         self.renderer.deinit();
+        self.physics.deinit();
     }
 };
 
 // Configuration constants
-const MOUSE_SENSITIVITY: f32 = config.Input.mouse_sensitivity;
-const PITCH_LIMIT: f32 = config.Input.pitch_limit;
-const EYE_HEIGHT: f32 = config.Rendering.eye_height;
-
-// Systems
-fn sys_input(inputs: []Input, resources: *Resources) void {
-    _ = resources;
-    for (inputs) |*i| {
-        i.yaw += i.mdx * MOUSE_SENSITIVITY;
-        i.pitch = std.math.clamp(i.pitch + i.mdy * MOUSE_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
-        i.mdx = 0; i.mdy = 0;
-    }
-}
-
-fn sys_physics(transforms: []Transform, physics_comps: []Physics, inputs: []Input, audios: []Audio, resources: *Resources) void {
-    physics.update(transforms, physics_comps, inputs, audios, &resources.world, resources.delta_time);
-}
-
-fn sys_render(transforms: []Transform, inputs: []Input, resources: *Resources) void {
-    for (transforms, inputs) |t, i| {
-        const eye = Vec3.add(t.pos, Vec3.new(0, EYE_HEIGHT, 0));
-        const cy, const sy = .{ @cos(i.yaw), @sin(i.yaw) };
-        const cp, const sp = .{ @cos(i.pitch), @sin(i.pitch) };
-        const view = Mat4{ .data = .{ 
-            cy, sy*sp, -sy*cp, 0, 
-            0, cp, sp, 0, 
-            sy, -cy*sp, cy*cp, 0, 
-            -eye.data[0]*cy - eye.data[2]*sy, 
-            -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, 
-            eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 
-            1 
-        }};
-        resources.render(view);
-        break;
-    }
-}
+const MOUSE_SENSITIVITY: f32 = 0.002;
+const PITCH_LIMIT: f32 = 1.5;
+const EYE_HEIGHT: f32 = 0.6;
 
 // Global state
-var store: ecs.Store(Registry, Resources) = undefined;
+var game: Game = undefined;
 var initialized: bool = false;
 
 export fn init() void {
@@ -208,76 +158,87 @@ export fn init() void {
     saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
     
-    store = ecs.Store(Registry, Resources){ .registry = .{ .players = .{} }, .resources = undefined };
-    store.resources.init(allocator);
+    game = .{ .allocator = allocator };
+    game.init(allocator);
     
-    // Build visual representation using original brushes for rendering
-    store.resources.buildWorldMesh() catch |err| {
+    game.buildWorldMesh() catch |err| {
         std.log.err("Failed to build world mesh: {}", .{err});
     };
     
-    // Create player - spawn at origin on the large ground plane
-    store.resources.player_entity = store.create(Player, allocator, .{
-        .transform = .{ .pos = Vec3.new(config.World.Player.spawn_x, config.World.Player.spawn_y, config.World.Player.spawn_z) },
-        .physics = .{}, .input = .{}, .audio = .{},
-    }) catch |err| {
-        std.log.err("Failed to create player entity: {}", .{err});
-        return; // Graceful failure - game will not initialize but won't crash
-    };
+    // Set initial player position
+    game.physics.setPosition(Vec3.new(0.0, 3.0, -20.0));
     
     initialized = true;
 }
 
 export fn frame() void {
-    store.resources.delta_time = @as(f32, @floatCast(sapp.frameDuration()));
-    store.run(sys_input);
-    store.run(sys_physics);
+    game.delta_time = @as(f32, @floatCast(sapp.frameDuration()));
     
+    // Update physics
+    game.physics.handleInput(MOUSE_SENSITIVITY, PITCH_LIMIT);
+    game.physics.update(&game.world, game.delta_time);
+    
+    // Render
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
-    store.run(sys_render);
     
-    renderer.Renderer.renderCrosshair();
+    const view = game.physics.getViewMatrix(EYE_HEIGHT);
+    game.renderer.render(view);
+    game.renderer.renderCrosshair();
     
-    simgui.render(); sg.endPass(); sg.commit();
+    simgui.render(); 
+    sg.endPass(); 
+    sg.commit();
 }
 
 export fn cleanup() void {
     initialized = false;
     saudio.shutdown();
-    store.resources.deinit();
-    store.registry.players.deinit(store.resources.allocator);
-    simgui.shutdown(); sg.shutdown();
+    game.deinit();
+    simgui.shutdown(); 
+    sg.shutdown();
 }
 
 export fn event(e: [*c]const sapp.Event) void {
-    // Validate event pointer
     if (e == null) return;
-    
     _ = simgui.handleEvent(e.*);
     
-    // Ensure player entity exists before accessing input
     if (!initialized) return;
-    const inp = store.get(store.resources.player_entity.id, *Input) orelse return;
     
     const d = e.*.type == .KEY_DOWN;
     
     switch (e.*.type) {
         .KEY_DOWN, .KEY_UP => switch (e.*.key_code) {
-            .W => inp.keys.w = d, .A => inp.keys.a = d, .S => inp.keys.s = d, .D => inp.keys.d = d, .SPACE => inp.keys.sp = d,
-            .ESCAPE => if (d and inp.lock) { inp.lock = false; sapp.showMouse(true); sapp.lockMouse(false); },
+            .W => game.physics.onKeyEvent(.W, d),
+            .A => game.physics.onKeyEvent(.A, d),
+            .S => game.physics.onKeyEvent(.S, d),
+            .D => game.physics.onKeyEvent(.D, d),
+            .SPACE => game.physics.onKeyEvent(.SPACE, d),
+            .ESCAPE => {
+                game.physics.onKeyEvent(.ESCAPE, d);
+                if (d and !game.physics.isMouseLocked()) {
+                    sapp.showMouse(true);
+                    sapp.lockMouse(false);
+                }
+            },
             else => {},
         },
-        .MOUSE_DOWN => if (e.*.mouse_button == .LEFT and !inp.lock) { inp.lock = true; sapp.showMouse(false); sapp.lockMouse(true); },
-        .MOUSE_MOVE => if (inp.lock) { inp.mdx += e.*.mouse_dx; inp.mdy += e.*.mouse_dy; },
+        .MOUSE_DOWN => if (e.*.mouse_button == .LEFT) {
+            game.physics.onMouseEvent(.LEFT, true);
+            if (game.physics.isMouseLocked()) {
+                sapp.showMouse(false);
+                sapp.lockMouse(true);
+            }
+        },
+        .MOUSE_MOVE => {
+            game.physics.onMouseMove(e.*.mouse_dx, e.*.mouse_dy);
+        },
         else => {},
     }
 }
 
 fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
-    // Validate parameters to prevent overflow and invalid access
     if (n <= 0 or c <= 0) return;
     
-    // Check for potential overflow in multiplication
     const n_usize: usize = @intCast(n);
     const c_usize: usize = @intCast(c);
     const total_samples = std.math.mul(usize, n_usize, c_usize) catch return;
@@ -287,22 +248,20 @@ fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
         return; 
     }
     
-    const sources = store.registry.players.items(.audio);
     for (0..n_usize) |f| {
-        var sample: f32 = 0;
-        for (sources) |*s| {
-            if (s.active and s.timer > 0) {
-                const sound_duration = config.Audio.jump_sound_duration;
-                const t = 1.0 - s.timer / sound_duration;
-                s.timer -= 1.0 / config.Audio.sample_rate;
-                sample += @sin((sound_duration - s.timer) * config.Audio.jump_frequency * config.Math.pi) * @exp(-t * config.Audio.jump_decay) * config.Audio.jump_volume;
-                if (s.timer <= 0) s.active = false;
-            }
-        }
+        const sample = game.physics.getAudioSample(44100.0);
         for (0..c_usize) |ch| buf[f * c_usize + ch] = sample;
     }
 }
 
 pub fn main() void {
-    sapp.run(.{ .init_cb = init, .frame_cb = frame, .cleanup_cb = cleanup, .event_cb = event, .width = config.Window.width, .height = config.Window.height, .window_title = config.Window.title });
+    sapp.run(.{ 
+        .init_cb = init, 
+        .frame_cb = frame, 
+        .cleanup_cb = cleanup, 
+        .event_cb = event, 
+        .width = 1024, 
+        .height = 768, 
+        .window_title = "FPS" 
+    });
 }

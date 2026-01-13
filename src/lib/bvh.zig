@@ -1,8 +1,167 @@
 const std = @import("std");
 const math = @import("math.zig");
-const config = @import("config.zig");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
+
+// BVH configuration constants
+const BVH_CONFIG = struct {
+    const traversal_cost: f32 = 0.3;
+    const max_leaf_size: u32 = 4;
+    const epsilon: f32 = 1e-6;
+    const split_candidates: u32 = 8;
+    const max_stack_depth: u32 = 64;
+};
+
+// Collision types
+pub const HullType = enum { point, standing };
+pub const CollisionResult = struct { normal: Vec3, distance: f32 };
+
+pub const Capsule = struct {
+    start: Vec3, end: Vec3, radius: f32,
+    
+    pub fn fromHull(pos: Vec3, hull_type: HullType) Capsule {
+        return switch (hull_type) {
+            .point => .{ .start = pos, .end = pos, .radius = 0.0 },
+            .standing => .{ 
+                .start = Vec3.add(pos, Vec3.new(0, -0.7, 0)), 
+                .end = Vec3.add(pos, Vec3.new(0, 0.7, 0)), 
+                .radius = 0.3 
+            },
+        };
+    }
+    
+    pub inline fn center(self: Capsule) Vec3 {
+        return Vec3.scale(Vec3.add(self.start, self.end), 0.5);
+    }
+    
+    pub inline fn bounds(self: Capsule) AABB {
+        const radius_vec = Vec3.new(self.radius, self.radius, self.radius);
+        return AABB{
+            .min = Vec3.sub(Vec3.min(self.start, self.end), radius_vec),
+            .max = Vec3.add(Vec3.max(self.start, self.end), radius_vec),
+        };
+    }
+};
+
+pub const Plane = struct {
+    normal: Vec3, distance: f32,
+    
+    pub fn distanceToPoint(self: Plane, point: Vec3) f32 { 
+        return Vec3.dot(self.normal, point) + self.distance; 
+    }
+};
+
+pub const Brush = struct {
+    planes: []const Plane, 
+    bounds: AABB,
+    
+    pub fn checkCapsule(self: Brush, capsule: Capsule) ?CollisionResult {
+        var closest_normal: ?Vec3 = null;
+        var closest_distance: f32 = std.math.floatMax(f32);
+        
+        for (self.planes) |plane| {
+            const distance = plane.distanceToPoint(capsule.center()) - capsule.radius;
+            if (distance > math.EPSILON) return null;
+            if (distance > -closest_distance) {
+                closest_distance = -distance;
+                closest_normal = plane.normal;
+            }
+        }
+        
+        return if (closest_normal) |normal| 
+            CollisionResult{ .normal = normal, .distance = closest_distance } 
+        else null;
+    }
+    
+    pub fn getBounds(self: Brush) AABB {
+        return self.bounds;
+    }
+};
+
+pub const CollisionWorld = struct {
+    bvh_tree: BVH(Brush),
+    original_brushes: []const Brush,
+    allocator: std.mem.Allocator,
+    
+    pub fn init(brushes: []const Brush, allocator: std.mem.Allocator) !CollisionWorld {
+        return CollisionWorld{
+            .original_brushes = brushes,
+            .bvh_tree = try BVH(Brush).init(brushes, allocator, Brush.getBounds),
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn deinit(self: *CollisionWorld) void {
+        self.bvh_tree.deinit();
+    }
+    
+    pub fn check(self: *const CollisionWorld, point: Vec3) ?CollisionResult {
+        const capsule = Capsule.fromHull(point, .standing);
+        return self.checkCapsule(capsule);
+    }
+    
+    pub fn checkCapsule(self: *const CollisionWorld, capsule: Capsule) ?CollisionResult {
+        if (self.bvh_tree.items.len == 0) {
+            for (self.original_brushes) |brush| if (brush.checkCapsule(capsule)) |collision| return collision;
+            return null;
+        }
+        
+        const capsule_bounds = capsule.bounds();
+        var best_collision: ?CollisionResult = null;
+        var best_distance: f32 = -std.math.floatMax(f32);
+        
+        var stack_ptr: u32 = 0;
+        var stack: [BVH_CONFIG.max_stack_depth]u32 = undefined;
+        stack[0] = 0;
+        stack_ptr = 1;
+        
+        while (stack_ptr > 0) {
+            stack_ptr -= 1;
+            const node_idx = stack[stack_ptr];
+            
+            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
+            
+            const node_data = @as(*const Node, @ptrCast(&self.bvh_tree.nodes.items[node_idx]));
+            
+            const node_bounds = AABB{ 
+                .min = Vec3.new(node_data.min_x, node_data.min_y, node_data.min_z), 
+                .max = Vec3.new(node_data.max_x, node_data.max_y, node_data.max_z) 
+            };
+            
+            if (!node_bounds.intersects(capsule_bounds)) continue;
+            
+            const is_leaf = (node_data.count_and_axis & 0x3) == 3;
+            if (is_leaf) {
+                const count = node_data.count_and_axis >> 2;
+                const end_idx = @min(node_data.first + count, self.bvh_tree.indices.items.len);
+                for (node_data.first..end_idx) |i| {
+                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule)) |collision| {
+                        if (collision.distance > best_distance) {
+                            best_distance = collision.distance;
+                            best_collision = collision;
+                            
+                            if (collision.distance > 0) return collision;
+                        }
+                    }
+                }
+            } else {
+                const left_child = node_data.first;
+                const right_child = left_child + 1;
+                
+                if (right_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
+                    stack[stack_ptr] = right_child;
+                    stack_ptr += 1;
+                }
+                if (left_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
+                    stack[stack_ptr] = left_child;
+                    stack_ptr += 1;
+                }
+            }
+        }
+        
+        return best_collision;
+    }
+};
 
 const Node = packed struct {
     // Reorder fields for better packing and cache efficiency
@@ -34,7 +193,7 @@ pub fn BVH(comptime T: type) type {
         allocator: std.mem.Allocator,
         
         // Pre-allocated traversal stack to avoid allocations during queries
-        traversal_stack: [config.World.BVH.max_stack_depth]u32 = undefined,
+        traversal_stack: [BVH_CONFIG.max_stack_depth]u32 = undefined,
         
         pub fn init(items: []const T, allocator: std.mem.Allocator, bounds_fn: fn(T) AABB) !Self {
             if (items.len == 0) return .{ 
@@ -73,7 +232,7 @@ pub fn BVH(comptime T: type) type {
             
             // Use pre-allocated stack for traversal - breadth-first layout benefits
             var stack_ptr: u32 = 0;
-            var stack: [config.World.BVH.max_stack_depth]u32 = undefined;
+            var stack: [BVH_CONFIG.max_stack_depth]u32 = undefined;
             stack[0] = 0;
             stack_ptr = 1;
             
@@ -121,7 +280,7 @@ pub fn BVH(comptime T: type) type {
         }
         
         fn buildRecursive(self: *Self, start: u32, count: u32, nodes: *std.ArrayListUnmanaged(Node), bounds_fn: fn(T) AABB, comptime bvh_config: struct {
-            max_leaf_size: u32 = config.World.BVH.max_leaf_size,
+            max_leaf_size: u32 = BVH_CONFIG.max_leaf_size,
         }) !u32 {
             const node_idx = @as(u32, @intCast(nodes.items.len));
             var bounds = bounds_fn(self.items[self.indices.items[start]]);
@@ -155,9 +314,9 @@ pub fn BVH(comptime T: type) type {
         const Split = struct { axis: u32, pos: f32, cost: f32 };
         
         fn findBestSplit(self: *Self, start: u32, count: u32, bounds: AABB, bounds_fn: fn(T) AABB, comptime bvh_config: struct {
-            traversal_cost: f32 = config.World.BVH.traversal_cost,
-            epsilon: f32 = config.World.BVH.epsilon,
-            split_candidates: u32 = 8, // Limit split candidates for better performance
+            traversal_cost: f32 = BVH_CONFIG.traversal_cost,
+            epsilon: f32 = BVH_CONFIG.epsilon,
+            split_candidates: u32 = BVH_CONFIG.split_candidates,
         }) Split {
             var best = Split{ .axis = 0, .pos = 0, .cost = std.math.floatMax(f32) };
             const parent_area = bounds.surface_area();
