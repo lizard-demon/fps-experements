@@ -4,6 +4,37 @@ const bvh = @import("../lib/bvh.zig");
 
 const Vec3 = math.Vec3;
 
+pub const Config = struct {
+    // Movement physics
+    gravity: f32 = 6.0,
+    jump_velocity: f32 = 2.0,
+    max_speed: f32 = 4.0,
+    air_speed: f32 = 0.7,
+    acceleration: f32 = 70.0,
+    friction: f32 = 5.0,
+    
+    // Collision detection
+    epsilon: f32 = 0.001,
+    step_height: f32 = 0.25,
+    ground_snap: f32 = 0.05,
+    margin: f32 = 0.02,
+    slope_limit: f32 = 0.707, // 45 degrees
+    slide_damping: f32 = 0.95,
+    slide_damping_step: f32 = 0.05,
+    max_slide_iterations: u32 = 3,
+    trace_samples_min: u32 = 4,
+    trace_samples_max: u32 = 16,
+    trace_samples_multiplier: f32 = 10.0,
+    binary_search_iterations: u32 = 8,
+    
+    // Hull dimensions
+    standing_height: f32 = 0.7,
+    standing_radius: f32 = 0.3,
+    
+    // Audio
+    jump_sound_duration: f32 = 0.15,
+};
+
 pub const World = struct {
     bvh_tree: bvh.BVH(bvh.Brush),
     allocator: std.mem.Allocator,
@@ -66,37 +97,6 @@ pub const World = struct {
         
         return best_collision;
     }
-};
-
-pub const Config = struct {
-    // Movement physics
-    gravity: f32 = 6.0,
-    jump_velocity: f32 = 2.0,
-    max_speed: f32 = 4.0,
-    air_speed: f32 = 0.7,
-    acceleration: f32 = 70.0,
-    friction: f32 = 5.0,
-    
-    // Collision detection
-    epsilon: f32 = 0.001,
-    step_height: f32 = 0.25,
-    ground_snap: f32 = 0.05,
-    margin: f32 = 0.02,
-    slope_limit: f32 = 0.707, // 45 degrees
-    slide_damping: f32 = 0.95,
-    slide_damping_step: f32 = 0.05,
-    max_slide_iterations: u32 = 3,
-    trace_samples_min: u32 = 4,
-    trace_samples_max: u32 = 16,
-    trace_samples_multiplier: f32 = 10.0,
-    binary_search_iterations: u32 = 8,
-    
-    // Hull dimensions
-    standing_height: f32 = 0.7,
-    standing_radius: f32 = 0.3,
-    
-    // Audio
-    jump_sound_duration: f32 = 0.15,
 };
 
 pub fn Physics(comptime config: Config) type {
