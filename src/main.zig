@@ -24,6 +24,7 @@ const World = physics_mod.World;
 const Game = struct {
     allocator: std.mem.Allocator,
     delta_time: f32 = 0,
+    mouse_locked: bool = false,
     
     // Systems
     physics: Physics = undefined,
@@ -222,23 +223,23 @@ export fn event(e: [*c]const sapp.Event) void {
             .D => game.physics.onKeyEvent(.D, d),
             .SPACE => game.physics.onKeyEvent(.SPACE, d),
             .ESCAPE => {
-                game.physics.onKeyEvent(.ESCAPE, d);
-                if (d and !game.physics.isMouseLocked()) {
+                if (d and game.mouse_locked) {
+                    game.mouse_locked = false;
                     sapp.showMouse(true);
                     sapp.lockMouse(false);
                 }
             },
             else => {},
         },
-        .MOUSE_DOWN => if (e.*.mouse_button == .LEFT) {
-            game.physics.onMouseEvent(.LEFT, true);
-            if (game.physics.isMouseLocked()) {
-                sapp.showMouse(false);
-                sapp.lockMouse(true);
-            }
+        .MOUSE_DOWN => if (e.*.mouse_button == .LEFT and !game.mouse_locked) {
+            game.mouse_locked = true;
+            sapp.showMouse(false);
+            sapp.lockMouse(true);
         },
         .MOUSE_MOVE => {
-            game.physics.onMouseMove(e.*.mouse_dx, e.*.mouse_dy);
+            if (game.mouse_locked) {
+                game.physics.onMouseMove(e.*.mouse_dx, e.*.mouse_dy);
+            }
         },
         else => {},
     }

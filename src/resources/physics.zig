@@ -34,21 +34,40 @@ pub const Config = struct {
     
     // Audio
     jump_sound_duration: f32 = 0.15,
+    
+    // Thresholds
+    input_deadzone: f32 = 0.001,
+    friction_threshold: f32 = 0.1,
 };
 
 pub const World = struct {
     bvh_tree: bvh.BVH(brush.Brush),
     allocator: std.mem.Allocator,
+    traversal_stack: std.ArrayListUnmanaged(u32),
     
     pub fn init(brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
+        const bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds);
+        
+        // Pre-allocate traversal stack based on BVH depth
+        // Maximum stack size is roughly 2 * log2(node_count) for balanced tree
+        const max_stack_size = if (bvh_tree.nodes.items.len > 0) 
+            @max(32, 2 * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.items.len))))) + 8)
+        else 
+            32;
+        
+        var traversal_stack = std.ArrayListUnmanaged(u32){};
+        try traversal_stack.ensureTotalCapacity(allocator, max_stack_size);
+        
         return World{
-            .bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds),
+            .bvh_tree = bvh_tree,
             .allocator = allocator,
+            .traversal_stack = traversal_stack,
         };
     }
     
     pub fn deinit(self: *World) void {
         self.bvh_tree.deinit();
+        self.traversal_stack.deinit(self.allocator);
     }
     
     pub fn collide(self: *const World, capsule: brush.Capsule) ?brush.CollisionResult {
@@ -56,9 +75,10 @@ pub const World = struct {
         var best_collision: ?brush.CollisionResult = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        var stack = std.ArrayListUnmanaged(u32){};
-        defer stack.deinit(self.allocator);
-        stack.append(self.allocator, 0) catch return null;
+        // Use pre-allocated stack - need to cast away const for mutation
+        var stack = @constCast(&self.traversal_stack);
+        stack.clearRetainingCapacity();
+        stack.appendAssumeCapacity(0);
         
         while (stack.items.len > 0) {
             const node_idx = stack.items[stack.items.len - 1];
@@ -85,10 +105,10 @@ pub const World = struct {
                 const right_child = left_child + 1;
                 
                 if (right_child < @as(u32, @intCast(self.bvh_tree.nodes.items.len))) {
-                    stack.append(self.allocator, right_child) catch continue;
+                    stack.appendAssumeCapacity(right_child);
                 }
                 if (left_child < @as(u32, @intCast(self.bvh_tree.nodes.items.len))) {
-                    stack.append(self.allocator, left_child) catch continue;
+                    stack.appendAssumeCapacity(left_child);
                 }
             }
         }
@@ -117,7 +137,6 @@ pub fn Physics(comptime config: Config) type {
                 d: bool = false, 
                 sp: bool = false 
             } = .{},
-            lock: bool = false,
             jump_timer: f32 = 0,
             jump_active: bool = false,
         };
@@ -203,36 +222,19 @@ pub fn Physics(comptime config: Config) type {
             return 0.0;
         }
         
-        pub fn onKeyEvent(self: *Self, key: enum { W, A, S, D, SPACE, ESCAPE }, pressed: bool) void {
+        pub fn onKeyEvent(self: *Self, key: enum { W, A, S, D, SPACE }, pressed: bool) void {
             switch (key) {
                 .W => self.state.keys.w = pressed,
                 .A => self.state.keys.a = pressed,
                 .S => self.state.keys.s = pressed,
                 .D => self.state.keys.d = pressed,
                 .SPACE => self.state.keys.sp = pressed,
-                .ESCAPE => if (pressed and self.state.lock) {
-                    self.state.lock = false;
-                },
-            }
-        }
-        
-        pub fn onMouseEvent(self: *Self, button: enum { LEFT }, pressed: bool) void {
-            switch (button) {
-                .LEFT => if (pressed and !self.state.lock) {
-                    self.state.lock = true;
-                },
             }
         }
         
         pub fn onMouseMove(self: *Self, dx: f32, dy: f32) void {
-            if (self.state.lock) {
-                self.state.mdx += dx;
-                self.state.mdy += dy;
-            }
-        }
-        
-        pub fn isMouseLocked(self: *const Self) bool {
-            return self.state.lock;
+            self.state.mdx += dx;
+            self.state.mdy += dy;
         }
         
         fn getInputDirection(self: *const Self) Vec3 {
@@ -245,7 +247,7 @@ pub fn Physics(comptime config: Config) type {
         
         fn accelerate(self: *Self, wish_dir: Vec3, dt: f32) void {
             const len = @sqrt(wish_dir.data[0] * wish_dir.data[0] + wish_dir.data[2] * wish_dir.data[2]);
-            if (len < 0.001) return;
+            if (len < config.input_deadzone) return;
             
             const wish = Vec3.scale(wish_dir, 1.0 / len);
             const max_vel = if (self.state.on_ground) config.max_speed * len else @min(config.max_speed * len, config.air_speed);
@@ -258,7 +260,7 @@ pub fn Physics(comptime config: Config) type {
         
         fn applyFriction(self: *Self, dt: f32) void {
             const speed = @sqrt(self.state.vel.data[0] * self.state.vel.data[0] + self.state.vel.data[2] * self.state.vel.data[2]);
-            if (speed > 0.1) {
+            if (speed > config.friction_threshold) {
                 const factor = @max(0, speed - speed * config.friction * dt) / speed;
                 self.state.vel.data[0] *= factor; 
                 self.state.vel.data[2] *= factor;
