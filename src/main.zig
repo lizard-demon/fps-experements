@@ -26,6 +26,17 @@ const Game = struct {
     delta_time: f32 = 0,
     mouse_locked: bool = false,
     
+    // Input state
+    keys: packed struct { 
+        w: bool = false, 
+        a: bool = false, 
+        s: bool = false, 
+        d: bool = false, 
+        sp: bool = false 
+    } = .{},
+    mouse_dx: f32 = 0,
+    mouse_dy: f32 = 0,
+    
     // Systems
     physics: Physics = undefined,
     renderer: Renderer = undefined,
@@ -175,7 +186,7 @@ export fn init() void {
     };
     
     // Set initial player position
-    game.physics.setPosition(Vec3.new(0.0, 3.0, -20.0));
+    game.physics.state.pos = Vec3.new(0.0, 3.0, -20.0);
     
     initialized = true;
 }
@@ -183,14 +194,24 @@ export fn init() void {
 export fn frame() void {
     game.delta_time = @as(f32, @floatCast(sapp.frameDuration()));
     
+    // Handle mouse input
+    game.physics.state.yaw += game.mouse_dx * MOUSE_SENSITIVITY;
+    game.physics.state.pitch = std.math.clamp(game.physics.state.pitch + game.mouse_dy * MOUSE_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
+    game.mouse_dx = 0;
+    game.mouse_dy = 0;
+    
+    // Calculate input direction
+    const fwd: f32 = if (game.keys.w) 1 else if (game.keys.s) -1 else 0;
+    const right: f32 = if (game.keys.d) 1 else if (game.keys.a) -1 else 0;
+    const wish_dir = math.wishdir(fwd, right, game.physics.state.yaw);
+    
     // Update physics
-    game.physics.handleInput(MOUSE_SENSITIVITY, PITCH_LIMIT);
-    game.physics.update(&game.world, game.delta_time);
+    game.physics.update(&game.world, wish_dir, game.keys.sp, game.delta_time);
     
     // Render
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
     
-    const view = game.physics.getViewMatrix(EYE_HEIGHT);
+    const view = math.Mat4.viewMatrix(game.physics.state.pos, game.physics.state.yaw, game.physics.state.pitch, EYE_HEIGHT);
     game.renderer.render(view);
     game.renderer.renderCrosshair();
     
@@ -217,11 +238,11 @@ export fn event(e: [*c]const sapp.Event) void {
     
     switch (e.*.type) {
         .KEY_DOWN, .KEY_UP => switch (e.*.key_code) {
-            .W => game.physics.onKeyEvent(.W, d),
-            .A => game.physics.onKeyEvent(.A, d),
-            .S => game.physics.onKeyEvent(.S, d),
-            .D => game.physics.onKeyEvent(.D, d),
-            .SPACE => game.physics.onKeyEvent(.SPACE, d),
+            .W => game.keys.w = d,
+            .A => game.keys.a = d,
+            .S => game.keys.s = d,
+            .D => game.keys.d = d,
+            .SPACE => game.keys.sp = d,
             .ESCAPE => {
                 if (d and game.mouse_locked) {
                     game.mouse_locked = false;
@@ -238,7 +259,8 @@ export fn event(e: [*c]const sapp.Event) void {
         },
         .MOUSE_MOVE => {
             if (game.mouse_locked) {
-                game.physics.onMouseMove(e.*.mouse_dx, e.*.mouse_dy);
+                game.mouse_dx += e.*.mouse_dx;
+                game.mouse_dy += e.*.mouse_dy;
             }
         },
         else => {},

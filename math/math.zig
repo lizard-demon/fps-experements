@@ -151,10 +151,31 @@ pub const Mat4 = struct {
             -s.dot(eye), -u.dot(eye), f.dot(eye), 1
         }};
     }
+    
+    pub inline fn viewMatrix(pos: Vec3, yaw: f32, pitch: f32, eye_height: f32) Mat4 {
+        const eye = Vec3.add(pos, Vec3.new(0, eye_height, 0));
+        const cy, const sy = .{ @cos(yaw), @sin(yaw) };
+        const cp, const sp = .{ @cos(pitch), @sin(pitch) };
+        return Mat4{ .data = .{ 
+            cy, sy*sp, -sy*cp, 0, 
+            0, cp, sp, 0, 
+            sy, -cy*sp, cy*cp, 0, 
+            -eye.data[0]*cy - eye.data[2]*sy, 
+            -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, 
+            eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 
+            1 
+        }};
+    }
 };
 
 pub inline fn perspective(fov: f32, asp: f32, n: f32, f: f32) Mat4 {
     const t = @tan(fov * std.math.pi / 360.0) * n;
     const r = t * asp;
     return .{ .data = .{ n / r, 0, 0, 0, 0, n / t, 0, 0, 0, 0, -(f + n) / (f - n), -1, 0, 0, -(2 * f * n) / (f - n), 0 } };
+}
+
+pub inline fn wishdir(fwd: f32, right: f32, yaw: f32) Vec3 {
+    const fwd_vec = Vec3.new(@sin(yaw), 0, -@cos(yaw));
+    const side_vec = Vec3.new(@cos(yaw), 0, @sin(yaw));
+    return Vec3.add(Vec3.scale(fwd_vec, fwd), Vec3.scale(side_vec, right));
 }

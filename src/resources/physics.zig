@@ -16,19 +16,14 @@ pub const Config = struct {
     
     // Collision detection
     epsilon: f32 = 0.001,
-    step_height: f32 = 0.25,
-    ground_snap: f32 = 0.05,
+    ground_check_distance: f32 = 0.1,
     margin: f32 = 0.02,
     slope_limit: f32 = 0.707, // 45 degrees
     slide_damping: f32 = 0.95,
     slide_damping_step: f32 = 0.05,
     max_slide_iterations: u32 = 3,
-    trace_samples_min: u32 = 4,
-    trace_samples_max: u32 = 16,
-    trace_samples_multiplier: f32 = 10.0,
-    binary_search_iterations: u32 = 8,
     
-    // Hull dimensions
+    // Hull dimensions (kept for potential future use)
     standing_height: f32 = 0.7,
     standing_radius: f32 = 0.3,
     
@@ -42,31 +37,24 @@ pub const Config = struct {
 
 pub const World = struct {
     bvh_tree: bvh.BVH(brush.Brush),
+    stack: std.ArrayListUnmanaged(u32),
     allocator: std.mem.Allocator,
-    traversal_stack: std.ArrayListUnmanaged(u32),
     
     pub fn init(brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
         if (brushes.len == 0) return error.NoBrushes;
         
         const bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds);
-        
-        // Pre-allocate traversal stack based on BVH depth
-        // Maximum stack size is roughly 2 * log2(node_count) for balanced tree
         const max_stack_size = @max(32, 2 * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.items.len))))) + 8);
         
-        var traversal_stack = std.ArrayListUnmanaged(u32){};
-        try traversal_stack.ensureTotalCapacity(allocator, max_stack_size);
+        var stack = std.ArrayListUnmanaged(u32){};
+        try stack.ensureTotalCapacity(allocator, max_stack_size);
         
-        return World{
-            .bvh_tree = bvh_tree,
-            .allocator = allocator,
-            .traversal_stack = traversal_stack,
-        };
+        return World{ .bvh_tree = bvh_tree, .stack = stack, .allocator = allocator };
     }
     
     pub fn deinit(self: *World) void {
         self.bvh_tree.deinit();
-        self.traversal_stack.deinit(self.allocator);
+        self.stack.deinit(self.allocator);
     }
     
     pub fn collide(self: *World, capsule: brush.Capsule, brush_config: brush.Config) ?brush.CollisionResult {
@@ -74,18 +62,15 @@ pub const World = struct {
         var best_collision: ?brush.CollisionResult = null;
         var best_distance: f32 = -std.math.floatMax(f32);
         
-        // Use pre-allocated stack
-        var stack = &self.traversal_stack;
-        stack.clearRetainingCapacity();
-        stack.appendAssumeCapacity(0);
+        self.stack.clearRetainingCapacity();
+        self.stack.appendAssumeCapacity(0);
         
-        while (stack.items.len > 0) {
-            const node_idx = stack.items[stack.items.len - 1];
-            stack.items.len -= 1;
+        while (self.stack.items.len > 0) {
+            const node_idx = self.stack.items[self.stack.items.len - 1];
+            self.stack.items.len -= 1;
+            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
             
-            if (node_idx >= @as(u32, @intCast(self.bvh_tree.nodes.items.len))) continue;
             const node = self.bvh_tree.nodes.items[node_idx];
-            
             if (!node.bounds().intersects(capsule_bounds)) continue;
             
             if (node.isLeaf()) {
@@ -100,19 +85,55 @@ pub const World = struct {
                     }
                 }
             } else {
-                const left_child = node.left();
-                const right_child = left_child + 1;
-                
-                if (right_child < @as(u32, @intCast(self.bvh_tree.nodes.items.len))) {
-                    stack.appendAssumeCapacity(right_child);
-                }
-                if (left_child < @as(u32, @intCast(self.bvh_tree.nodes.items.len))) {
-                    stack.appendAssumeCapacity(left_child);
-                }
+                const left = node.left();
+                if (left + 1 < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left + 1);
+                if (left < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left);
             }
         }
         
         return best_collision;
+    }
+    
+    pub fn raycast(self: *World, ray_start: Vec3, ray_dir: Vec3, max_distance: f32) ?brush.CollisionResult {
+        var best_hit: ?brush.CollisionResult = null;
+        var best_distance: f32 = max_distance;
+        
+        // Create ray AABB for BVH traversal
+        const ray_end = Vec3.add(ray_start, Vec3.scale(ray_dir, max_distance));
+        const ray_bounds = math.AABB{
+            .min = Vec3.min(ray_start, ray_end),
+            .max = Vec3.max(ray_start, ray_end),
+        };
+        
+        self.stack.clearRetainingCapacity();
+        self.stack.appendAssumeCapacity(0);
+        
+        while (self.stack.items.len > 0) {
+            const node_idx = self.stack.items[self.stack.items.len - 1];
+            self.stack.items.len -= 1;
+            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
+            
+            const node = self.bvh_tree.nodes.items[node_idx];
+            if (!node.bounds().intersects(ray_bounds)) continue;
+            
+            if (node.isLeaf()) {
+                const end_idx = @min(node.first + node.count(), self.bvh_tree.indices.items.len);
+                for (node.first..end_idx) |i| {
+                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].rayIntersect(ray_start, ray_dir, best_distance)) |hit| {
+                        if (hit.distance < best_distance) {
+                            best_distance = hit.distance;
+                            best_hit = hit;
+                        }
+                    }
+                }
+            } else {
+                const left = node.left();
+                if (left + 1 < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left + 1);
+                if (left < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left);
+            }
+        }
+        
+        return best_hit;
     }
 };
 
@@ -120,100 +141,48 @@ pub fn Physics(comptime config: Config) type {
     return struct {
         const Self = @This();
         
-        // Internal state
-        const State = struct {
+        pub const State = struct {
             pos: Vec3 = Vec3.zero(),
             vel: Vec3 = Vec3.zero(),
             on_ground: bool = false,
             yaw: f32 = 0,
             pitch: f32 = 0,
-            mdx: f32 = 0,
-            mdy: f32 = 0,
-            keys: packed struct { 
-                w: bool = false, 
-                a: bool = false, 
-                s: bool = false, 
-                d: bool = false, 
-                sp: bool = false 
-            } = .{},
             jump_timer: f32 = 0,
             jump_active: bool = false,
         };
         
         pub const Move = struct { pos: Vec3, hit: ?brush.CollisionResult = null };
         
-        allocator: std.mem.Allocator,
         state: State = .{},
-        brush_config: brush.Config = .{},
         
         pub fn init(allocator: std.mem.Allocator) Self {
-            return Self{ 
-                .allocator = allocator,
-                .brush_config = .{
-                    .standing_height = config.standing_height,
-                    .standing_radius = config.standing_radius,
-                    .collision_epsilon = config.epsilon,
-                },
-            };
+            _ = allocator;
+            return Self{};
         }
         
         pub fn deinit(self: *Self) void {
             _ = self;
         }
         
-        pub fn setPosition(self: *Self, pos: Vec3) void {
-            self.state.pos = pos;
-        }
-        
-        pub fn getPosition(self: *const Self) Vec3 {
-            return self.state.pos;
-        }
-        
-        pub fn getViewMatrix(self: *const Self, eye_height: f32) math.Mat4 {
-            const eye = Vec3.add(self.state.pos, Vec3.new(0, eye_height, 0));
-            const cy, const sy = .{ @cos(self.state.yaw), @sin(self.state.yaw) };
-            const cp, const sp = .{ @cos(self.state.pitch), @sin(self.state.pitch) };
-            return math.Mat4{ .data = .{ 
-                cy, sy*sp, -sy*cp, 0, 
-                0, cp, sp, 0, 
-                sy, -cy*sp, cy*cp, 0, 
-                -eye.data[0]*cy - eye.data[2]*sy, 
-                -eye.data[0]*sy*sp - eye.data[1]*cp + eye.data[2]*cy*sp, 
-                eye.data[0]*sy*cp - eye.data[1]*sp - eye.data[2]*cy*cp, 
-                1 
-            }};
-        }
-        
-        pub fn handleInput(self: *Self, mouse_sensitivity: f32, pitch_limit: f32) void {
-            self.state.yaw += self.state.mdx * mouse_sensitivity;
-            self.state.pitch = std.math.clamp(self.state.pitch + self.state.mdy * mouse_sensitivity, -pitch_limit, pitch_limit);
-            self.state.mdx = 0; 
-            self.state.mdy = 0;
-        }
-        
-        pub fn update(self: *Self, collision_world: *World, dt: f32) void {
-            // Ground check and physics
-            self.state.on_ground = self.isOnGround(collision_world, self.state.pos);
+        pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
+            self.state.on_ground = self.isOnGround(world, self.state.pos);
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
-            if (self.state.keys.sp and self.state.on_ground) { 
+            if (jump and self.state.on_ground) { 
                 self.state.vel.data[1] = config.jump_velocity; 
                 self.state.jump_timer = config.jump_sound_duration; 
                 self.state.jump_active = true; 
             }
             
-            // Movement
-            const input_dir = self.getInputDirection();
-            self.accelerate(input_dir, dt);
+            self.accelerate(wish_dir, dt);
             if (self.state.on_ground) self.applyFriction(dt);
             
-            // Move and handle collisions
-            const move_result = self.move(collision_world, self.state.pos, Vec3.scale(self.state.vel, dt));
+            const move_result = self.move(world, self.state.pos, Vec3.scale(self.state.vel, dt));
             self.state.pos = move_result.pos;
             
-            if (move_result.hit) |hit_result| {
-                const into_surface = Vec3.dot(self.state.vel, hit_result.normal);
+            if (move_result.hit) |hit| {
+                const into_surface = Vec3.dot(self.state.vel, hit.normal);
                 if (into_surface < 0) {
-                    self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit_result.normal, into_surface));
+                    self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
                 }
             }
         }
@@ -227,29 +196,6 @@ pub fn Physics(comptime config: Config) type {
                 return sample;
             }
             return 0.0;
-        }
-        
-        pub fn onKeyEvent(self: *Self, key: enum { W, A, S, D, SPACE }, pressed: bool) void {
-            switch (key) {
-                .W => self.state.keys.w = pressed,
-                .A => self.state.keys.a = pressed,
-                .S => self.state.keys.s = pressed,
-                .D => self.state.keys.d = pressed,
-                .SPACE => self.state.keys.sp = pressed,
-            }
-        }
-        
-        pub fn onMouseMove(self: *Self, dx: f32, dy: f32) void {
-            self.state.mdx += dx;
-            self.state.mdy += dy;
-        }
-        
-        fn getInputDirection(self: *const Self) Vec3 {
-            const fwd: f32 = if (self.state.keys.w) 1 else if (self.state.keys.s) -1 else 0;
-            const side: f32 = if (self.state.keys.d) 1 else if (self.state.keys.a) -1 else 0;
-            const fwd_vec = Vec3.new(@sin(self.state.yaw), 0, -@cos(self.state.yaw));
-            const side_vec = Vec3.new(@cos(self.state.yaw), 0, @sin(self.state.yaw));
-            return Vec3.add(Vec3.scale(fwd_vec, fwd), Vec3.scale(side_vec, side));
         }
         
         fn accelerate(self: *Self, wish_dir: Vec3, dt: f32) void {
@@ -277,111 +223,51 @@ pub fn Physics(comptime config: Config) type {
             }
         }
         
-        fn isOnGround(self: *Self, world_collision: *World, pos: Vec3) bool {
-            const test_pos = Vec3.new(pos.data[0], pos.data[1] - config.ground_snap, pos.data[2]);
-            const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
-            if (world_collision.collide(capsule, self.brush_config)) |hit_result| {
-                return hit_result.normal.data[1] > config.slope_limit;
+        fn isOnGround(self: *Self, world: *World, pos: Vec3) bool {
+            _ = self;
+            const ray_start = pos;
+            const ray_dir = Vec3.new(0, -1, 0);
+            
+            if (world.raycast(ray_start, ray_dir, config.ground_check_distance)) |hit| {
+                return hit.normal.data[1] > config.slope_limit;
             }
             return false;
         }
         
-        pub fn move(self: *Self, world_collision: *World, start: Vec3, delta: Vec3) Move {
+        pub fn move(self: *Self, world: *World, start: Vec3, delta: Vec3) Move {
+            _ = self;
             if (Vec3.length(delta) < config.epsilon) return .{ .pos = start };
             
-            // Try direct movement
-            const end_capsule = brush.Capsule.fromHull(Vec3.add(start, delta), .standing, self.brush_config);
-            if (world_collision.collide(end_capsule, self.brush_config) == null) {
-                return .{ .pos = Vec3.add(start, delta) };
-            }
+            var pos = start;
+            var vel = delta;
+            var first_hit: ?brush.CollisionResult = null;
             
-            // Slide movement
-            return self.slide(world_collision, start, delta);
-        }
-        
-        const TraceResult = struct { end_pos: Vec3, hit: ?brush.CollisionResult, time: f32 };
-        
-        fn trace(self: *Self, world_collision: *World, start: Vec3, delta: Vec3) TraceResult {
-            const move_length = Vec3.length(delta);
-            if (move_length < config.epsilon) return .{ .end_pos = start, .hit = null, .time = 1.0 };
-            
-            var best_time: f32 = 1.0;
-            var hit: ?brush.CollisionResult = null;
-            
-            const samples = @min(config.trace_samples_max, @max(config.trace_samples_min, @as(u32, @intFromFloat(move_length * config.trace_samples_multiplier))));
-            for (0..samples) |i| {
-                const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
-                const test_pos = Vec3.add(start, Vec3.scale(delta, t));
-                const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
+            for (0..config.max_slide_iterations) |bump| {
+                const move_length = Vec3.length(vel);
+                if (move_length < config.epsilon) break;
                 
-                if (world_collision.collide(capsule, self.brush_config)) |hit_result| {
-                    best_time = self.binarySearch(world_collision, start, delta, 
-                                       if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
-                    hit = hit_result;
+                const ray_dir = Vec3.normalize(vel);
+                if (world.raycast(pos, ray_dir, move_length)) |hit| {
+                    if (first_hit == null) first_hit = hit;
+                    
+                    // Move to just before collision
+                    const safe_distance = @max(0, hit.distance - config.margin);
+                    pos = Vec3.add(pos, Vec3.scale(ray_dir, safe_distance));
+                    
+                    // Slide along surface
+                    const into_surface = Vec3.dot(vel, hit.normal);
+                    if (into_surface >= 0) break;
+                    
+                    vel = Vec3.sub(vel, Vec3.scale(hit.normal, into_surface));
+                    vel = Vec3.scale(vel, config.slide_damping - (@as(f32, @floatFromInt(bump)) * config.slide_damping_step));
+                } else {
+                    // No collision, move freely
+                    pos = Vec3.add(pos, vel);
                     break;
                 }
             }
             
-            if (hit != null) {
-                best_time = @max(0, best_time - config.margin / move_length);
-            }
-            
-            return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .hit = hit, .time = best_time };
-        }
-        
-        fn slide(self: *Self, world_collision: *World, start: Vec3, velocity: Vec3) Move {
-            var pos = start;
-            var vel = velocity;
-            var remaining_time: f32 = 1.0;
-            var first_hit: ?brush.CollisionResult = null;
-            var planes: [config.max_slide_iterations]Vec3 = undefined;
-            var num_planes: u32 = 0;
-            
-            for (0..config.max_slide_iterations) |bump| {
-                if (Vec3.length(vel) < config.epsilon or remaining_time <= 0.001) break;
-                
-                const result = self.trace(world_collision, pos, Vec3.scale(vel, remaining_time));
-                pos = result.end_pos;
-                
-                if (result.hit) |hit_result| {
-                    if (first_hit == null) first_hit = hit_result;
-                    remaining_time *= (1.0 - result.time);
-                    
-                    const into_surface = Vec3.dot(vel, hit_result.normal);
-                    if (into_surface >= 0) break;
-                    
-                    if (num_planes < planes.len) {
-                        planes[num_planes] = hit_result.normal;
-                        num_planes += 1;
-                    }
-                    
-                    for (planes[0..num_planes]) |plane| {
-                        const dot = Vec3.dot(vel, plane);
-                        if (dot < 0) vel = Vec3.sub(vel, Vec3.scale(plane, dot));
-                    }
-                    
-                    vel = Vec3.scale(vel, config.slide_damping - (@as(f32, @floatFromInt(bump)) * config.slide_damping_step));
-                } else break;
-            }
-            
             return .{ .pos = pos, .hit = first_hit };
-        }
-        
-        fn binarySearch(self: *Self, world_collision: *World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
-            var l = low;
-            var h = high;
-            for (0..config.binary_search_iterations) |_| {
-                const mid = (l + h) * 0.5;
-                const test_pos = Vec3.add(start, Vec3.scale(delta, mid));
-                const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
-                
-                if (world_collision.collide(capsule, self.brush_config) != null) {
-                    h = mid;
-                } else {
-                    l = mid;
-                }
-            }
-            return l;
         }
     };
 }
