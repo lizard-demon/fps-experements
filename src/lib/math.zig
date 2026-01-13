@@ -1,11 +1,6 @@
 // Math utilities for TinyCode FPS
 const std = @import("std");
 
-// Global constants - single source of truth
-pub const EPSILON: f32 = 0.001;
-pub const STEP_HEIGHT: f32 = 0.25;
-pub const GROUND_SNAP: f32 = 0.05;
-
 pub const Vec3 = struct {
     data: @Vector(3, f32),
 

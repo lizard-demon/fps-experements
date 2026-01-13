@@ -3,8 +3,70 @@ const math = @import("../lib/math.zig");
 const bvh = @import("../lib/bvh.zig");
 
 const Vec3 = math.Vec3;
-const EPSILON = math.EPSILON;
-const GROUND_SNAP = math.GROUND_SNAP;
+
+pub const World = struct {
+    bvh_tree: bvh.BVH(bvh.Brush),
+    allocator: std.mem.Allocator,
+    
+    pub fn init(brushes: []const bvh.Brush, allocator: std.mem.Allocator) !World {
+        return World{
+            .bvh_tree = try bvh.BVH(bvh.Brush).init(brushes, allocator, bvh.Brush.getBounds),
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn deinit(self: *World) void {
+        self.bvh_tree.deinit();
+    }
+    
+    pub fn check(self: *const World, capsule: bvh.Capsule) ?bvh.CollisionResult {
+        const capsule_bounds = capsule.bounds();
+        var best_collision: ?bvh.CollisionResult = null;
+        var best_distance: f32 = -std.math.floatMax(f32);
+        
+        // Use BVH config for stack size
+        var stack: [64]u32 = undefined;
+        var stack_ptr: u32 = 1;
+        stack[0] = 0;
+        
+        while (stack_ptr > 0) {
+            stack_ptr -= 1;
+            const node_idx = stack[stack_ptr];
+            
+            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
+            const node = self.bvh_tree.nodes.items[node_idx];
+            
+            if (!node.bounds().intersects(capsule_bounds)) continue;
+            
+            if (node.isLeaf()) {
+                const end_idx = @min(node.first + node.count(), self.bvh_tree.indices.items.len);
+                for (node.first..end_idx) |i| {
+                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule)) |collision| {
+                        if (collision.distance > best_distance) {
+                            best_distance = collision.distance;
+                            best_collision = collision;
+                            if (collision.distance > 0) return collision;
+                        }
+                    }
+                }
+            } else {
+                const left_child = node.left();
+                const right_child = left_child + 1;
+                
+                if (right_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
+                    stack[stack_ptr] = right_child;
+                    stack_ptr += 1;
+                }
+                if (left_child < self.bvh_tree.nodes.items.len and stack_ptr < stack.len) {
+                    stack[stack_ptr] = left_child;
+                    stack_ptr += 1;
+                }
+            }
+        }
+        
+        return best_collision;
+    }
+};
 
 pub const Config = struct {
     // Movement physics
@@ -16,6 +78,9 @@ pub const Config = struct {
     friction: f32 = 5.0,
     
     // Collision detection
+    epsilon: f32 = 0.001,
+    step_height: f32 = 0.25,
+    ground_snap: f32 = 0.05,
     margin: f32 = 0.02,
     slope_limit: f32 = 0.707, // 45 degrees
     slide_damping: f32 = 0.95,
@@ -102,7 +167,7 @@ pub fn Physics(comptime config: Config) type {
             self.state.mdy = 0;
         }
         
-        pub fn update(self: *Self, collision_world: *const bvh.CollisionWorld, dt: f32) void {
+        pub fn update(self: *Self, collision_world: *const World, dt: f32) void {
             // Ground check and physics
             self.state.on_ground = self.isOnGround(collision_world, self.state.pos);
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
@@ -205,22 +270,22 @@ pub fn Physics(comptime config: Config) type {
             }
         }
         
-        fn isOnGround(self: *Self, world_collision: *const bvh.CollisionWorld, pos: Vec3) bool {
+        fn isOnGround(self: *Self, world_collision: *const World, pos: Vec3) bool {
             _ = self;
-            const test_pos = Vec3.new(pos.data[0], pos.data[1] - GROUND_SNAP, pos.data[2]);
+            const test_pos = Vec3.new(pos.data[0], pos.data[1] - config.ground_snap, pos.data[2]);
             const capsule = bvh.Capsule.fromHull(test_pos, .standing);
-            if (world_collision.checkCapsule(capsule)) |hit_result| {
+            if (world_collision.check(capsule)) |hit_result| {
                 return hit_result.normal.data[1] > config.slope_limit;
             }
             return false;
         }
         
-        pub fn move(world_collision: *const bvh.CollisionWorld, start: Vec3, delta: Vec3) Move {
-            if (Vec3.length(delta) < EPSILON) return .{ .pos = start };
+        pub fn move(world_collision: *const World, start: Vec3, delta: Vec3) Move {
+            if (Vec3.length(delta) < config.epsilon) return .{ .pos = start };
             
             // Try direct movement
             const end_capsule = bvh.Capsule.fromHull(Vec3.add(start, delta), .standing);
-            if (world_collision.checkCapsule(end_capsule) == null) {
+            if (world_collision.check(end_capsule) == null) {
                 return .{ .pos = Vec3.add(start, delta) };
             }
             
@@ -230,9 +295,9 @@ pub fn Physics(comptime config: Config) type {
         
         const TraceResult = struct { end_pos: Vec3, hit: ?bvh.CollisionResult, time: f32 };
         
-        fn trace(world_collision: *const bvh.CollisionWorld, start: Vec3, delta: Vec3) TraceResult {
+        fn trace(world_collision: *const World, start: Vec3, delta: Vec3) TraceResult {
             const move_length = Vec3.length(delta);
-            if (move_length < EPSILON) return .{ .end_pos = start, .hit = null, .time = 1.0 };
+            if (move_length < config.epsilon) return .{ .end_pos = start, .hit = null, .time = 1.0 };
             
             var best_time: f32 = 1.0;
             var hit: ?bvh.CollisionResult = null;
@@ -243,7 +308,7 @@ pub fn Physics(comptime config: Config) type {
                 const test_pos = Vec3.add(start, Vec3.scale(delta, t));
                 const capsule = bvh.Capsule.fromHull(test_pos, .standing);
                 
-                if (world_collision.checkCapsule(capsule)) |hit_result| {
+                if (world_collision.check(capsule)) |hit_result| {
                     best_time = binarySearch(world_collision, start, delta, 
                                        if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
                     hit = hit_result;
@@ -258,7 +323,7 @@ pub fn Physics(comptime config: Config) type {
             return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .hit = hit, .time = best_time };
         }
         
-        fn slide(world_collision: *const bvh.CollisionWorld, start: Vec3, velocity: Vec3) Move {
+        fn slide(world_collision: *const World, start: Vec3, velocity: Vec3) Move {
             var pos = start;
             var vel = velocity;
             var remaining_time: f32 = 1.0;
@@ -267,7 +332,7 @@ pub fn Physics(comptime config: Config) type {
             var num_planes: u32 = 0;
             
             for (0..config.max_slide_iterations) |bump| {
-                if (Vec3.length(vel) < EPSILON or remaining_time <= 0.001) break;
+                if (Vec3.length(vel) < config.epsilon or remaining_time <= 0.001) break;
                 
                 const result = trace(world_collision, pos, Vec3.scale(vel, remaining_time));
                 pos = result.end_pos;
@@ -296,7 +361,7 @@ pub fn Physics(comptime config: Config) type {
             return .{ .pos = pos, .hit = first_hit };
         }
         
-        fn binarySearch(world_collision: *const bvh.CollisionWorld, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
+        fn binarySearch(world_collision: *const World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
             var l = low;
             var h = high;
             for (0..config.binary_search_iterations) |_| {
@@ -304,7 +369,7 @@ pub fn Physics(comptime config: Config) type {
                 const test_pos = Vec3.add(start, Vec3.scale(delta, mid));
                 const capsule = bvh.Capsule.fromHull(test_pos, .standing);
                 
-                if (world_collision.checkCapsule(capsule) != null) {
+                if (world_collision.check(capsule) != null) {
                     h = mid;
                 } else {
                     l = mid;

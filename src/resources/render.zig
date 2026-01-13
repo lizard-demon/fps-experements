@@ -73,7 +73,7 @@ pub fn Renderer(comptime config: Config) type {
                                 const n3 = p3.normal;
                                 
                                 const det = Vec3.dot(n1, Vec3.cross(n2, n3));
-                                if (@abs(det) < math.EPSILON) break :blk null;
+                                if (@abs(det) < 0.001) break :blk null;
                                 
                                 const c1 = Vec3.cross(n2, n3);
                                 const c2 = Vec3.cross(n3, n1);
@@ -85,13 +85,13 @@ pub fn Renderer(comptime config: Config) type {
                             if (intersection) |vertex| {
                                 // check if vertex is inside brush
                                 const inside_brush = blk: {
-                                    for (brush.planes) |plane| if (plane.distanceToPoint(vertex) > math.EPSILON) break :blk false;
+                                    for (brush.planes) |plane| if (plane.distanceToPoint(vertex) > 0.001) break :blk false;
                                     break :blk true;
                                 };
                                 
                                 // check if vertex is duplicate
                                 const is_duplicate = blk: {
-                                    for (hull_vertices.items) |existing| if (Vec3.dist(vertex, existing) < math.EPSILON * 10.0) break :blk true;
+                                    for (hull_vertices.items) |existing| if (Vec3.dist(vertex, existing) < 0.01) break :blk true;
                                     break :blk false;
                                 };
                                 
@@ -139,7 +139,7 @@ pub fn Renderer(comptime config: Config) type {
                             const edge2 = Vec3.sub(v2, v0);
                             const normal = Vec3.cross(edge1, edge2);
                             
-                            if (Vec3.length(normal) < math.EPSILON) continue;
+                            if (Vec3.length(normal) < 0.001) continue;
                             
                             // Check if all other vertices are on one side of this triangle
                             var is_hull_face = true;
@@ -149,7 +149,7 @@ pub fn Renderer(comptime config: Config) type {
                                 if (idx == i or idx == j or idx == k) continue;
                                 
                                 const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
-                                if (@abs(dot) > math.EPSILON) {
+                                if (@abs(dot) > 0.001) {
                                     if (side_sign == null) {
                                         side_sign = dot;
                                     } else if (side_sign.? * dot < 0) {

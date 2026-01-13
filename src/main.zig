@@ -8,14 +8,16 @@ const ig = @import("cimgui");
 
 const math = @import("lib/math.zig");
 const bvh = @import("lib/bvh.zig");
+const physics_mod = @import("resources/physics.zig");
 
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
 const AABB = math.AABB;
 
 // Module types
-const Physics = @import("resources/physics.zig").Physics(.{});
+const Physics = physics_mod.Physics(.{});
 const Renderer = @import("resources/render.zig").Renderer(.{});
+const World = physics_mod.World;
 
 // Game state
 const Game = struct {
@@ -27,7 +29,7 @@ const Game = struct {
     renderer: Renderer = undefined,
     
     // World data
-    world: bvh.CollisionWorld = undefined,
+    world: World = undefined,
     brush_planes: [80]bvh.Plane = undefined,
     brushes: [8]bvh.Brush = undefined,
     
@@ -117,7 +119,7 @@ const Game = struct {
     }
     
     fn initializeWorld(self: *@This(), brush_count: usize) void {
-        self.world = bvh.CollisionWorld.init(self.brushes[0..brush_count], self.allocator) catch |err| {
+        self.world = World.init(self.brushes[0..brush_count], self.allocator) catch |err| {
             std.log.err("Failed to initialize world: {}", .{err});
             return;
         };
@@ -133,7 +135,12 @@ const Game = struct {
     }
     
     fn buildWorldMesh(self: *@This()) !void {
-        try self.renderer.buildWorldMesh(self.world.original_brushes);
+        // Find the actual number of brushes used
+        var brush_count: usize = 0;
+        for (self.brushes) |brush| {
+            if (brush.planes.len > 0) brush_count += 1;
+        }
+        try self.renderer.buildWorldMesh(self.brushes[0..brush_count]);
     }
     
     fn deinit(self: *@This()) void {
