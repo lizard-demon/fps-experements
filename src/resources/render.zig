@@ -66,14 +66,14 @@ pub fn Renderer(comptime config: Config) type {
                 var hull_vertices = std.ArrayListUnmanaged(Vec3){};
                 defer hull_vertices.deinit(self.allocator);
                 
-                for (0..b.planes.len) |i| {
-                    for (i + 1..b.planes.len) |j| {
-                        for (j + 1..b.planes.len) |k| {
+                for (0..b.plane_data.len()) |i| {
+                    for (i + 1..b.plane_data.len()) |j| {
+                        for (j + 1..b.plane_data.len()) |k| {
                             // intersect three planes
                             const intersection = blk: {
-                                const p1 = b.planes[i];
-                                const p2 = b.planes[j];
-                                const p3 = b.planes[k];
+                                const p1 = b.plane_data.get(i);
+                                const p2 = b.plane_data.get(j);
+                                const p3 = b.plane_data.get(k);
                                 const n1 = p1.normal;
                                 const n2 = p2.normal;
                                 const n3 = p3.normal;
@@ -91,7 +91,10 @@ pub fn Renderer(comptime config: Config) type {
                             if (intersection) |vertex| {
                                 // check if vertex is inside brush
                                 const inside_brush = blk: {
-                                    for (b.planes) |plane| if (plane.distanceToPoint(vertex) > config.vertex_epsilon) break :blk false;
+                                    for (0..b.plane_data.len()) |plane_idx| {
+                                        const plane = b.plane_data.get(plane_idx);
+                                        if (plane.distanceToPoint(vertex) > config.vertex_epsilon) break :blk false;
+                                    }
                                     break :blk true;
                                 };
                                 

@@ -10,21 +10,39 @@ pub const Plane = struct {
     normal: Vec3, 
     distance: f32,
     
+    const Config = struct {
+        parallel_epsilon: f32 = 0.0001,
+    };
+    const config = Config{};
+    
     pub fn distanceToPoint(self: Plane, point: Vec3) f32 { 
         return Vec3.dot(self.normal, point) + self.distance; 
     }
     
     pub fn rayIntersect(self: Plane, ray_start: Vec3, ray_dir: Vec3) ?f32 {
         const denom = Vec3.dot(self.normal, ray_dir);
-        if (@abs(denom) < 0.0001) return null; // Ray parallel to plane
+        if (@abs(denom) < config.parallel_epsilon) return null; // Ray parallel to plane
         
         const t = -(Vec3.dot(self.normal, ray_start) + self.distance) / denom;
         return if (t >= 0) t else null;
     }
 };
 
+pub const PlaneData = struct {
+    normals: []const Vec3,
+    distances: []const f32,
+    
+    pub fn get(self: PlaneData, index: usize) Plane {
+        return .{ .normal = self.normals[index], .distance = self.distances[index] };
+    }
+    
+    pub fn len(self: PlaneData) usize {
+        return self.normals.len;
+    }
+};
+
 pub const Brush = struct {
-    planes: []const Plane, 
+    plane_data: PlaneData, 
     bounds: AABB,
     
     pub fn rayIntersect(self: Brush, ray_start: Vec3, ray_dir: Vec3, max_distance: f32) ?CollisionResult {
@@ -32,7 +50,8 @@ pub const Brush = struct {
         var exit_time: f32 = max_distance;
         var hit_normal: Vec3 = Vec3.zero();
         
-        for (self.planes) |plane| {
+        for (0..self.plane_data.len()) |i| {
+            const plane = self.plane_data.get(i);
             if (plane.rayIntersect(ray_start, ray_dir)) |t| {
                 const dot = Vec3.dot(plane.normal, ray_dir);
                 if (dot < 0) { // Entering

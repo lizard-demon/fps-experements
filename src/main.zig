@@ -43,7 +43,8 @@ const Game = struct {
     
     // World data
     world: World = undefined,
-    brush_planes: [80]brush.Plane = undefined,
+    plane_normals: [80]Vec3 = undefined,
+    plane_distances: [80]f32 = undefined,
     brushes: [8]brush.Brush = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
@@ -78,21 +79,28 @@ const Game = struct {
     }
     
     fn addBoxBrush(self: *@This(), plane_idx: *usize, center: Vec3, size: Vec3, brush_idx: usize) u32 {
-        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
+        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.plane_normals.len) return 0;
         
         const half_size = Vec3.scale(size, 0.5);
-        const planes = [6]brush.Plane{
-            .{ .normal = Vec3.new( 1,  0,  0), .distance = -(center.data[0] + half_size.data[0]) },
-            .{ .normal = Vec3.new(-1,  0,  0), .distance = center.data[0] - half_size.data[0] },
-            .{ .normal = Vec3.new( 0,  1,  0), .distance = -(center.data[1] + half_size.data[1]) },
-            .{ .normal = Vec3.new( 0, -1,  0), .distance = center.data[1] - half_size.data[1] },
-            .{ .normal = Vec3.new( 0,  0,  1), .distance = -(center.data[2] + half_size.data[2]) },
-            .{ .normal = Vec3.new( 0,  0, -1), .distance = center.data[2] - half_size.data[2] },
+        const normals = [6]Vec3{
+            Vec3.new( 1,  0,  0), Vec3.new(-1,  0,  0),
+            Vec3.new( 0,  1,  0), Vec3.new( 0, -1,  0),
+            Vec3.new( 0,  0,  1), Vec3.new( 0,  0, -1),
+        };
+        const distances = [6]f32{
+            -(center.data[0] + half_size.data[0]), center.data[0] - half_size.data[0],
+            -(center.data[1] + half_size.data[1]), center.data[1] - half_size.data[1],
+            -(center.data[2] + half_size.data[2]), center.data[2] - half_size.data[2],
         };
         
-        @memcpy(self.brush_planes[plane_idx.*..plane_idx.* + 6], &planes);
+        @memcpy(self.plane_normals[plane_idx.*..plane_idx.* + 6], &normals);
+        @memcpy(self.plane_distances[plane_idx.*..plane_idx.* + 6], &distances);
+        
         self.brushes[brush_idx] = .{ 
-            .planes = self.brush_planes[plane_idx.*..plane_idx.* + 6], 
+            .plane_data = .{
+                .normals = self.plane_normals[plane_idx.*..plane_idx.* + 6],
+                .distances = self.plane_distances[plane_idx.*..plane_idx.* + 6],
+            },
             .bounds = AABB.new(Vec3.sub(center, half_size), Vec3.add(center, half_size))
         };
         plane_idx.* += 6;
@@ -100,7 +108,7 @@ const Game = struct {
     }
     
     fn addSlopeBrush(self: *@This(), plane_idx: *usize, brush_idx: usize) u32 {
-        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.brush_planes.len) return 0;
+        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.plane_normals.len) return 0;
         
         const slope_width = 30.0;
         const slope_height = 20.0;
@@ -110,18 +118,24 @@ const Game = struct {
         const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
         const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
         
-        const planes = [6]brush.Plane{
-            .{ .normal = Vec3.new( 0, -1,  0), .distance = 0.0 },
-            .{ .normal = Vec3.new(-1,  0,  0), .distance = -slope_width/2 },
-            .{ .normal = Vec3.new( 1,  0,  0), .distance = -slope_width/2 },
-            .{ .normal = Vec3.new( 0,  0, -1), .distance = slope_center.data[2] - slope_width/2 },
-            .{ .normal = Vec3.new( 0,  0,  1), .distance = -(slope_center.data[2] + slope_width/2) },
-            .{ .normal = slope_normal, .distance = -Vec3.dot(slope_normal, slope_point) },
+        const normals = [6]Vec3{
+            Vec3.new( 0, -1,  0), Vec3.new(-1,  0,  0), Vec3.new( 1,  0,  0),
+            Vec3.new( 0,  0, -1), Vec3.new( 0,  0,  1), slope_normal,
+        };
+        const distances = [6]f32{
+            0.0, -slope_width/2, -slope_width/2,
+            slope_center.data[2] - slope_width/2, -(slope_center.data[2] + slope_width/2),
+            -Vec3.dot(slope_normal, slope_point),
         };
         
-        @memcpy(self.brush_planes[plane_idx.*..plane_idx.* + 6], &planes);
+        @memcpy(self.plane_normals[plane_idx.*..plane_idx.* + 6], &normals);
+        @memcpy(self.plane_distances[plane_idx.*..plane_idx.* + 6], &distances);
+        
         self.brushes[brush_idx] = .{ 
-            .planes = self.brush_planes[plane_idx.*..plane_idx.* + 6], 
+            .plane_data = .{
+                .normals = self.plane_normals[plane_idx.*..plane_idx.* + 6],
+                .distances = self.plane_distances[plane_idx.*..plane_idx.* + 6],
+            },
             .bounds = AABB.new(
                 Vec3.new(-slope_width/2, 0.0, slope_center.data[2] - slope_width/2), 
                 Vec3.new(slope_width/2, slope_height, slope_center.data[2] + slope_width/2)
@@ -140,7 +154,7 @@ const Game = struct {
         std.log.info("Created {} brushes", .{brush_count});
         for (self.brushes[0..brush_count], 0..) |b, i| {
             std.log.info("  Brush {}: {} planes, bounds: ({d:.1},{d:.1},{d:.1}) to ({d:.1},{d:.1},{d:.1})", .{
-                i, b.planes.len,
+                i, b.plane_data.len(),
                 b.bounds.min.data[0], b.bounds.min.data[1], b.bounds.min.data[2],
                 b.bounds.max.data[0], b.bounds.max.data[1], b.bounds.max.data[2]
             });
@@ -151,7 +165,7 @@ const Game = struct {
         // Find the actual number of brushes used
         var brush_count: usize = 0;
         for (self.brushes) |b| {
-            if (b.planes.len > 0) brush_count += 1;
+            if (b.plane_data.len() > 0) brush_count += 1;
         }
         try self.renderer.buildWorldMesh(self.brushes[0..brush_count]);
     }

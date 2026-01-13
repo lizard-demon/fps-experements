@@ -16,15 +16,22 @@ pub const Config = struct {
     
     // Collision detection
     epsilon: f32 = 0.001,
-    ground_check_distance: f32 = 0.1,
     margin: f32 = 0.02,
     slope_limit: f32 = 0.707, // 45 degrees
     slide_damping: f32 = 0.95,
     slide_damping_step: f32 = 0.05,
     max_slide_iterations: u32 = 3,
     
+    // BVH stack sizing
+    min_stack_size: u32 = 32,
+    stack_size_multiplier: u32 = 2,
+    stack_size_padding: u32 = 8,
+    
     // Audio
     jump_sound_duration: f32 = 0.15,
+    audio_frequency: f32 = 500.0,
+    audio_decay: f32 = 8.0,
+    audio_amplitude: f32 = 0.3,
     
     // Thresholds
     input_deadzone: f32 = 0.001,
@@ -36,11 +43,13 @@ pub const World = struct {
     stack: std.ArrayListUnmanaged(u32),
     allocator: std.mem.Allocator,
     
+    const config = Config{};
+    
     pub fn init(brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
         if (brushes.len == 0) return error.NoBrushes;
         
         const bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds);
-        const max_stack_size = @max(32, 2 * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.items.len))))) + 8);
+        const max_stack_size = @max(config.min_stack_size, config.stack_size_multiplier * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.len))))) + config.stack_size_padding);
         
         var stack = std.ArrayListUnmanaged(u32){};
         try stack.ensureTotalCapacity(allocator, max_stack_size);
@@ -70,14 +79,17 @@ pub const World = struct {
         while (self.stack.items.len > 0) {
             const node_idx = self.stack.items[self.stack.items.len - 1];
             self.stack.items.len -= 1;
-            if (node_idx >= self.bvh_tree.nodes.items.len) continue;
+            if (node_idx >= self.bvh_tree.nodes.len) continue;
             
-            const node = self.bvh_tree.nodes.items[node_idx];
-            if (!node.bounds.intersects(ray_bounds)) continue;
+            const node_bounds = self.bvh_tree.nodes.get(node_idx).bounds;
+            const node_type = self.bvh_tree.nodes.get(node_idx).node_type;
+            if (!node_bounds.intersects(ray_bounds)) continue;
             
-            if (node.node_type == .leaf) {
-                const end_idx = @min(node.first + node.count, self.bvh_tree.indices.items.len);
-                for (node.first..end_idx) |i| {
+            if (node_type == .leaf) {
+                const first = self.bvh_tree.nodes.get(node_idx).first;
+                const count = self.bvh_tree.nodes.get(node_idx).count;
+                const end_idx = @min(first + count, self.bvh_tree.indices.items.len);
+                for (first..end_idx) |i| {
                     if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].rayIntersect(ray_start, ray_dir, best_distance)) |hit| {
                         if (hit.distance < best_distance) {
                             best_distance = hit.distance;
@@ -86,9 +98,9 @@ pub const World = struct {
                     }
                 }
             } else {
-                const left = node.first;
-                if (left + 1 < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left + 1);
-                if (left < self.bvh_tree.nodes.items.len) self.stack.appendAssumeCapacity(left);
+                const left = self.bvh_tree.nodes.get(node_idx).first;
+                if (left + 1 < self.bvh_tree.nodes.len) self.stack.appendAssumeCapacity(left + 1);
+                if (left < self.bvh_tree.nodes.len) self.stack.appendAssumeCapacity(left);
             }
         }
         
@@ -115,28 +127,37 @@ pub fn Physics(comptime config: Config) type {
         state: State = .{},
         
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
-            if (world.raycast(self.state.pos, Vec3.new(0, -1, 0), config.ground_check_distance)) |ground_hit| {
-                self.state.on_ground = ground_hit.normal.data[1] > config.slope_limit;
-            } else {
-                self.state.on_ground = false;
-            }
-            
+            // Apply gravity
             if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
+            
+            // Handle jumping
             if (jump and self.state.on_ground) {
                 self.state.vel.data[1] = config.jump_velocity;
                 self.state.jump_timer = config.jump_sound_duration;
                 self.state.jump_active = true;
             }
             
+            // Apply movement forces
             self.accelerate(wish_dir, dt);
             if (self.state.on_ground) self.friction(dt);
             
+            // Move and detect ground in one unified step
             const move_result = self.move(world, self.state.pos, Vec3.scale(self.state.vel, dt));
             self.state.pos = move_result.pos;
             
+            // Update ground state and handle collision response
             if (move_result.hit) |hit| {
+                // Check if we hit ground (upward-facing surface)
+                self.state.on_ground = hit.normal.data[1] > config.slope_limit;
+                
+                // Reflect velocity off surface
                 const into_surface = Vec3.dot(self.state.vel, hit.normal);
-                if (into_surface < 0) self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
+                if (into_surface < 0) {
+                    self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
+                }
+            } else {
+                // No collision - we're in the air
+                self.state.on_ground = false;
             }
         }
         
@@ -144,7 +165,7 @@ pub fn Physics(comptime config: Config) type {
             if (self.state.jump_active and self.state.jump_timer > 0) {
                 const t = 1.0 - self.state.jump_timer / config.jump_sound_duration;
                 self.state.jump_timer -= 1.0 / sample_rate;
-                const sample = @sin((config.jump_sound_duration - self.state.jump_timer) * 500.0 * std.math.pi) * @exp(-t * 8.0) * 0.3;
+                const sample = @sin((config.jump_sound_duration - self.state.jump_timer) * config.audio_frequency * std.math.pi) * @exp(-t * config.audio_decay) * config.audio_amplitude;
                 if (self.state.jump_timer <= 0) self.state.jump_active = false;
                 return sample;
             }
