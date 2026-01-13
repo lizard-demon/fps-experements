@@ -70,7 +70,7 @@ pub const World = struct {
         self.traversal_stack.deinit(self.allocator);
     }
     
-    pub fn collide(self: *const World, capsule: brush.Capsule) ?brush.CollisionResult {
+    pub fn collide(self: *const World, capsule: brush.Capsule, brush_config: brush.Config) ?brush.CollisionResult {
         const capsule_bounds = capsule.bounds();
         var best_collision: ?brush.CollisionResult = null;
         var best_distance: f32 = -std.math.floatMax(f32);
@@ -92,7 +92,7 @@ pub const World = struct {
             if (node.isLeaf()) {
                 const end_idx = @min(node.first + node.count(), self.bvh_tree.indices.items.len);
                 for (node.first..end_idx) |i| {
-                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule)) |collision| {
+                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].checkCapsule(capsule, brush_config)) |collision| {
                         if (collision.distance > best_distance) {
                             best_distance = collision.distance;
                             best_collision = collision;
@@ -145,9 +145,17 @@ pub fn Physics(comptime config: Config) type {
         
         allocator: std.mem.Allocator,
         state: State = .{},
+        brush_config: brush.Config = .{},
         
         pub fn init(allocator: std.mem.Allocator) Self {
-            return Self{ .allocator = allocator };
+            return Self{ 
+                .allocator = allocator,
+                .brush_config = .{
+                    .standing_height = config.standing_height,
+                    .standing_radius = config.standing_radius,
+                    .collision_epsilon = config.epsilon,
+                },
+            };
         }
         
         pub fn deinit(self: *Self) void {
@@ -200,7 +208,7 @@ pub fn Physics(comptime config: Config) type {
             if (self.state.on_ground) self.applyFriction(dt);
             
             // Move and handle collisions
-            const move_result = move(collision_world, self.state.pos, Vec3.scale(self.state.vel, dt));
+            const move_result = self.move(collision_world, self.state.pos, Vec3.scale(self.state.vel, dt));
             self.state.pos = move_result.pos;
             
             if (move_result.hit) |hit_result| {
@@ -271,31 +279,30 @@ pub fn Physics(comptime config: Config) type {
         }
         
         fn isOnGround(self: *Self, world_collision: *const World, pos: Vec3) bool {
-            _ = self;
             const test_pos = Vec3.new(pos.data[0], pos.data[1] - config.ground_snap, pos.data[2]);
-            const capsule = brush.Capsule.fromHull(test_pos, .standing);
-            if (world_collision.collide(capsule)) |hit_result| {
+            const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
+            if (world_collision.collide(capsule, self.brush_config)) |hit_result| {
                 return hit_result.normal.data[1] > config.slope_limit;
             }
             return false;
         }
         
-        pub fn move(world_collision: *const World, start: Vec3, delta: Vec3) Move {
+        pub fn move(self: *Self, world_collision: *const World, start: Vec3, delta: Vec3) Move {
             if (Vec3.length(delta) < config.epsilon) return .{ .pos = start };
             
             // Try direct movement
-            const end_capsule = brush.Capsule.fromHull(Vec3.add(start, delta), .standing);
-            if (world_collision.collide(end_capsule) == null) {
+            const end_capsule = brush.Capsule.fromHull(Vec3.add(start, delta), .standing, self.brush_config);
+            if (world_collision.collide(end_capsule, self.brush_config) == null) {
                 return .{ .pos = Vec3.add(start, delta) };
             }
             
             // Slide movement
-            return slide(world_collision, start, delta);
+            return self.slide(world_collision, start, delta);
         }
         
         const TraceResult = struct { end_pos: Vec3, hit: ?brush.CollisionResult, time: f32 };
         
-        fn trace(world_collision: *const World, start: Vec3, delta: Vec3) TraceResult {
+        fn trace(self: *Self, world_collision: *const World, start: Vec3, delta: Vec3) TraceResult {
             const move_length = Vec3.length(delta);
             if (move_length < config.epsilon) return .{ .end_pos = start, .hit = null, .time = 1.0 };
             
@@ -306,10 +313,10 @@ pub fn Physics(comptime config: Config) type {
             for (0..samples) |i| {
                 const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(samples - 1));
                 const test_pos = Vec3.add(start, Vec3.scale(delta, t));
-                const capsule = brush.Capsule.fromHull(test_pos, .standing);
+                const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
                 
-                if (world_collision.collide(capsule)) |hit_result| {
-                    best_time = binarySearch(world_collision, start, delta, 
+                if (world_collision.collide(capsule, self.brush_config)) |hit_result| {
+                    best_time = self.binarySearch(world_collision, start, delta, 
                                        if (i > 0) @as(f32, @floatFromInt(i - 1)) / @as(f32, @floatFromInt(samples - 1)) else 0.0, t);
                     hit = hit_result;
                     break;
@@ -323,7 +330,7 @@ pub fn Physics(comptime config: Config) type {
             return .{ .end_pos = Vec3.add(start, Vec3.scale(delta, best_time)), .hit = hit, .time = best_time };
         }
         
-        fn slide(world_collision: *const World, start: Vec3, velocity: Vec3) Move {
+        fn slide(self: *Self, world_collision: *const World, start: Vec3, velocity: Vec3) Move {
             var pos = start;
             var vel = velocity;
             var remaining_time: f32 = 1.0;
@@ -334,7 +341,7 @@ pub fn Physics(comptime config: Config) type {
             for (0..config.max_slide_iterations) |bump| {
                 if (Vec3.length(vel) < config.epsilon or remaining_time <= 0.001) break;
                 
-                const result = trace(world_collision, pos, Vec3.scale(vel, remaining_time));
+                const result = self.trace(world_collision, pos, Vec3.scale(vel, remaining_time));
                 pos = result.end_pos;
                 
                 if (result.hit) |hit_result| {
@@ -361,15 +368,15 @@ pub fn Physics(comptime config: Config) type {
             return .{ .pos = pos, .hit = first_hit };
         }
         
-        fn binarySearch(world_collision: *const World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
+        fn binarySearch(self: *Self, world_collision: *const World, start: Vec3, delta: Vec3, low: f32, high: f32) f32 {
             var l = low;
             var h = high;
             for (0..config.binary_search_iterations) |_| {
                 const mid = (l + h) * 0.5;
                 const test_pos = Vec3.add(start, Vec3.scale(delta, mid));
-                const capsule = brush.Capsule.fromHull(test_pos, .standing);
+                const capsule = brush.Capsule.fromHull(test_pos, .standing, self.brush_config);
                 
-                if (world_collision.collide(capsule) != null) {
+                if (world_collision.collide(capsule, self.brush_config) != null) {
                     h = mid;
                 } else {
                     l = mid;

@@ -7,18 +7,24 @@ const AABB = math.AABB;
 pub const HullType = enum { point, standing };
 pub const CollisionResult = struct { normal: Vec3, distance: f32 };
 
+pub const Config = struct {
+    standing_height: f32 = 0.7,
+    standing_radius: f32 = 0.3,
+    collision_epsilon: f32 = 0.001,
+};
+
 pub const Capsule = struct {
     start: Vec3, 
     end: Vec3, 
     radius: f32,
     
-    pub fn fromHull(pos: Vec3, hull_type: HullType) Capsule {
+    pub fn fromHull(pos: Vec3, hull_type: HullType, config: Config) Capsule {
         return switch (hull_type) {
             .point => .{ .start = pos, .end = pos, .radius = 0.0 },
             .standing => .{ 
-                .start = Vec3.add(pos, Vec3.new(0, -0.7, 0)), 
-                .end = Vec3.add(pos, Vec3.new(0, 0.7, 0)), 
-                .radius = 0.3 
+                .start = Vec3.add(pos, Vec3.new(0, -config.standing_height, 0)), 
+                .end = Vec3.add(pos, Vec3.new(0, config.standing_height, 0)), 
+                .radius = config.standing_radius 
             },
         };
     }
@@ -49,13 +55,13 @@ pub const Brush = struct {
     planes: []const Plane, 
     bounds: AABB,
     
-    pub fn checkCapsule(self: Brush, capsule: Capsule) ?CollisionResult {
+    pub fn checkCapsule(self: Brush, capsule: Capsule, config: Config) ?CollisionResult {
         var closest_normal: ?Vec3 = null;
         var closest_distance: f32 = std.math.floatMax(f32);
         
         for (self.planes) |plane| {
             const distance = plane.distanceToPoint(capsule.center()) - capsule.radius;
-            if (distance > 0.001) return null;
+            if (distance > config.collision_epsilon) return null;
             if (distance > -closest_distance) {
                 closest_distance = -distance;
                 closest_normal = plane.normal;

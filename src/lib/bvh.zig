@@ -10,6 +10,7 @@ const Config = struct {
     epsilon: f32 = 1e-6,
     split_candidates: u32 = 8,
     max_stack_depth: u32 = 64,
+    layout_queue_initial_size: u32 = 512,
 };
 
 // BVH Node - packed for cache efficiency
@@ -215,34 +216,35 @@ pub fn BVH(comptime T: type) type {
             if (tree_nodes.len == 0) return;
             
             const nodes = try self.allocator.alloc(Node, tree_nodes.len);
-            var queue: [512]u32 = undefined;
+            var queue = std.ArrayListUnmanaged(u32){};
+            defer queue.deinit(self.allocator);
+            
+            try queue.ensureTotalCapacity(self.allocator, @max(config.layout_queue_initial_size, tree_nodes.len));
+            queue.appendAssumeCapacity(0);
+            
             var queue_head: u32 = 0;
-            var queue_tail: u32 = 1;
-            queue[0] = 0;
             var write_idx: u32 = 0;
             
-            while (queue_head < queue_tail and write_idx < nodes.len) {
-                const tree_idx = queue[queue_head];
+            while (queue_head < queue.items.len and write_idx < nodes.len) {
+                const tree_idx = queue.items[queue_head];
                 queue_head += 1;
                 
                 if (tree_idx >= tree_nodes.len) continue;
                 const tree_node = tree_nodes[tree_idx];
                 nodes[write_idx] = tree_node;
                 
-                if (!tree_node.isLeaf() and queue_tail + 1 < queue.len) {
+                if (!tree_node.isLeaf()) {
                     const left_tree_idx = tree_node.first;
                     const right_tree_idx = left_tree_idx + 1;
                     
-                    const left_bf_idx = write_idx + (queue_tail - queue_head) + 1;
+                    const left_bf_idx = write_idx + (queue.items.len - queue_head) + 1;
                     nodes[write_idx].first = left_bf_idx;
                     
-                    if (left_tree_idx < tree_nodes.len) { 
-                        queue[queue_tail] = left_tree_idx; 
-                        queue_tail += 1; 
+                    if (left_tree_idx < tree_nodes.len) {
+                        try queue.append(self.allocator, left_tree_idx);
                     }
-                    if (right_tree_idx < tree_nodes.len and queue_tail < queue.len) { 
-                        queue[queue_tail] = right_tree_idx; 
-                        queue_tail += 1; 
+                    if (right_tree_idx < tree_nodes.len) {
+                        try queue.append(self.allocator, right_tree_idx);
                     }
                 }
                 write_idx += 1;
