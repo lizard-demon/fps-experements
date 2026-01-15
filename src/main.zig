@@ -9,6 +9,7 @@ const ig = @import("cimgui");
 const math = @import("math");
 const bvh = @import("lib/bvh.zig");
 const brush = @import("lib/brush.zig");
+const wav = @import("lib/wav.zig");
 const physics_mod = @import("resources/physics.zig");
 
 const Vec3 = math.Vec3;
@@ -49,7 +50,7 @@ const Game = struct {
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.physics = Physics{};
+        self.physics = Physics.init(&mixer);
         self.renderer = Renderer.init(allocator);
         
         var plane_idx: usize = 0;
@@ -97,7 +98,7 @@ const Game = struct {
         @memcpy(self.plane_distances[plane_idx.*..plane_idx.* + 6], &distances);
         
         self.brushes[brush_idx] = .{ 
-            .plane_data = .{
+            .planes = .{
                 .normals = self.plane_normals[plane_idx.*..plane_idx.* + 6],
                 .distances = self.plane_distances[plane_idx.*..plane_idx.* + 6],
             },
@@ -132,7 +133,7 @@ const Game = struct {
         @memcpy(self.plane_distances[plane_idx.*..plane_idx.* + 6], &distances);
         
         self.brushes[brush_idx] = .{ 
-            .plane_data = .{
+            .planes = .{
                 .normals = self.plane_normals[plane_idx.*..plane_idx.* + 6],
                 .distances = self.plane_distances[plane_idx.*..plane_idx.* + 6],
             },
@@ -154,7 +155,7 @@ const Game = struct {
         std.log.info("Created {} brushes", .{brush_count});
         for (self.brushes[0..brush_count], 0..) |b, i| {
             std.log.info("  Brush {}: {} planes, bounds: ({d:.1},{d:.1},{d:.1}) to ({d:.1},{d:.1},{d:.1})", .{
-                i, b.plane_data.len(),
+                i, b.planes.len(),
                 b.bounds.min.data[0], b.bounds.min.data[1], b.bounds.min.data[2],
                 b.bounds.max.data[0], b.bounds.max.data[1], b.bounds.max.data[2]
             });
@@ -165,7 +166,7 @@ const Game = struct {
         // Find the actual number of brushes used
         var brush_count: usize = 0;
         for (self.brushes) |b| {
-            if (b.plane_data.len() > 0) brush_count += 1;
+            if (b.planes.len() > 0) brush_count += 1;
         }
         try self.renderer.buildWorldMesh(self.brushes[0..brush_count]);
     }
@@ -184,12 +185,32 @@ const EYE_HEIGHT: f32 = 0.6;
 // Global state
 var game: Game = undefined;
 var initialized: bool = false;
+var mixer: wav.Mixer = undefined;
+var background_music: ?*wav.Audio = null;
 
 export fn init() void {
     const allocator = std.heap.c_allocator;
     sg.setup(.{ .environment = sokol.glue.environment() });
     saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
+    
+    mixer = wav.Mixer.init(allocator);
+    
+    // Load and start background music
+    background_music = mixer.load("assets/game/music.wav") catch |err| blk: {
+        std.log.err("Failed to load background music: {}", .{err});
+        break :blk null;
+    };
+    
+    if (background_music) |music| {
+        // Find free voice and start looping music
+        for (&mixer.voices) |*voice| {
+            if (voice.audio == null) {
+                voice.* = .{ .audio = music, .looping = true, .volume = 0.3 };
+                break;
+            }
+        }
+    }
     
     game = .{ .allocator = allocator };
     game.init(allocator);
@@ -236,7 +257,16 @@ export fn frame() void {
 export fn cleanup() void {
     initialized = false;
     saudio.shutdown();
+    
+    // Stop background music by clearing voices
+    for (&mixer.voices) |*voice| {
+        if (voice.audio == background_music) {
+            voice.audio = null;
+        }
+    }
+    
     game.deinit();
+    mixer.deinit();
     simgui.shutdown(); 
     sg.shutdown();
 }
@@ -293,7 +323,7 @@ fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
     }
     
     for (0..n_usize) |f| {
-        const sample = game.physics.getAudioSample(44100.0);
+        const sample = mixer.sample(44100.0);
         for (0..c_usize) |ch| buf[f * c_usize + ch] = sample;
     }
 }

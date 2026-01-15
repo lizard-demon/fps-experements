@@ -66,17 +66,17 @@ pub fn Renderer(comptime config: Config) type {
                 var hull_vertices = std.ArrayListUnmanaged(Vec3){};
                 defer hull_vertices.deinit(self.allocator);
                 
-                for (0..b.plane_data.len()) |i| {
-                    for (i + 1..b.plane_data.len()) |j| {
-                        for (j + 1..b.plane_data.len()) |k| {
+                for (0..b.planes.len()) |i| {
+                    for (i + 1..b.planes.len()) |j| {
+                        for (j + 1..b.planes.len()) |k| {
                             // intersect three planes
                             const intersection = blk: {
-                                const p1 = b.plane_data.get(i);
-                                const p2 = b.plane_data.get(j);
-                                const p3 = b.plane_data.get(k);
-                                const n1 = p1.normal;
-                                const n2 = p2.normal;
-                                const n3 = p3.normal;
+                                const n1 = b.planes.normals[i];
+                                const n2 = b.planes.normals[j];
+                                const n3 = b.planes.normals[k];
+                                const d1 = b.planes.distances[i];
+                                const d2 = b.planes.distances[j];
+                                const d3 = b.planes.distances[k];
                                 
                                 const det = Vec3.dot(n1, Vec3.cross(n2, n3));
                                 if (@abs(det) < config.vertex_epsilon) break :blk null;
@@ -85,15 +85,14 @@ pub fn Renderer(comptime config: Config) type {
                                 const c2 = Vec3.cross(n3, n1);
                                 const c3 = Vec3.cross(n1, n2);
                                 
-                                break :blk Vec3.scale(Vec3.add(Vec3.add(Vec3.scale(c1, -p1.distance), Vec3.scale(c2, -p2.distance)), Vec3.scale(c3, -p3.distance)), 1.0 / det);
+                                break :blk Vec3.scale(Vec3.add(Vec3.add(Vec3.scale(c1, -d1), Vec3.scale(c2, -d2)), Vec3.scale(c3, -d3)), 1.0 / det);
                             };
                             
                             if (intersection) |vertex| {
                                 // check if vertex is inside brush
                                 const inside_brush = blk: {
-                                    for (0..b.plane_data.len()) |plane_idx| {
-                                        const plane = b.plane_data.get(plane_idx);
-                                        if (plane.distanceToPoint(vertex) > config.vertex_epsilon) break :blk false;
+                                    for (0..b.planes.len()) |plane_idx| {
+                                        if (b.planes.distanceToPoint(plane_idx, vertex) > config.vertex_epsilon) break :blk false;
                                     }
                                     break :blk true;
                                 };

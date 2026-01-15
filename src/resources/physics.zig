@@ -2,6 +2,7 @@ const std = @import("std");
 const math = @import("math");
 const bvh = @import("../lib/bvh.zig");
 const brush = @import("../lib/brush.zig");
+const wav = @import("../lib/wav.zig");
 
 const Vec3 = math.Vec3;
 
@@ -42,12 +43,16 @@ pub const Config = struct {
 };
 
 pub const World = struct {
-    bvh_tree: bvh.BVH(brush.Brush),
+    Bvh: bvh.BVH(brush.Brush),
     stack: std.ArrayListUnmanaged(u32),
     allocator: std.mem.Allocator,
     brushes: []brush.Brush,
     
     const config = Config{};
+    
+    fn getBounds(b: brush.Brush) math.AABB {
+        return b.bounds;
+    }
     
     pub fn init(original_brushes: []const brush.Brush, allocator: std.mem.Allocator) !World {
         if (original_brushes.len == 0) return error.NoBrushes;
@@ -58,14 +63,14 @@ pub const World = struct {
             brushes[i] = try b.expand(config.player_radius, allocator);
         }
         
-        const bvh_tree = try bvh.BVH(brush.Brush).init(brushes, allocator, brush.Brush.getBounds);
-        const max_stack_size = @max(config.min_stack_size, config.stack_size_multiplier * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(bvh_tree.nodes.len))))) + config.stack_size_padding);
+        const Bvh = try bvh.BVH(brush.Brush).init(brushes, allocator, getBounds);
+        const max_stack_size = @max(config.min_stack_size, config.stack_size_multiplier * @as(u32, @intFromFloat(@log2(@as(f32, @floatFromInt(Bvh.nodes.len))))) + config.stack_size_padding);
         
         var stack = std.ArrayListUnmanaged(u32){};
         try stack.ensureTotalCapacity(allocator, max_stack_size);
         
         return World{ 
-            .bvh_tree = bvh_tree, 
+            .Bvh = Bvh, 
             .stack = stack, 
             .allocator = allocator,
             .brushes = brushes,
@@ -75,17 +80,17 @@ pub const World = struct {
     pub fn deinit(self: *World) void {
         // Free expanded brush plane data
         for (self.brushes) |b| {
-            self.allocator.free(b.plane_data.normals);
-            self.allocator.free(b.plane_data.distances);
+            self.allocator.free(b.planes.normals);
+            self.allocator.free(b.planes.distances);
         }
         self.allocator.free(self.brushes);
         
-        self.bvh_tree.deinit();
+        self.Bvh.deinit();
         self.stack.deinit(self.allocator);
     }
     
-    pub fn raycast(self: *World, ray_start: Vec3, ray_dir: Vec3, max_distance: f32) ?brush.CollisionResult {
-        var best_hit: ?brush.CollisionResult = null;
+    pub fn raycast(self: *World, ray_start: Vec3, ray_dir: Vec3, max_distance: f32) ?brush.Plane {
+        var best_hit: ?brush.Plane = null;
         var best_distance: f32 = max_distance;
         
         // Create ray AABB for BVH traversal
@@ -101,18 +106,18 @@ pub const World = struct {
         while (self.stack.items.len > 0) {
             const node_idx = self.stack.items[self.stack.items.len - 1];
             self.stack.items.len -= 1;
-            if (node_idx >= self.bvh_tree.nodes.len) continue;
+            if (node_idx >= self.Bvh.nodes.len) continue;
             
-            const node_bounds = self.bvh_tree.nodes.get(node_idx).bounds;
-            const node_type = self.bvh_tree.nodes.get(node_idx).node_type;
+            const node_bounds = self.Bvh.nodes.get(node_idx).bounds;
+            const node_type = self.Bvh.nodes.get(node_idx).node_type;
             if (!node_bounds.intersects(ray_bounds)) continue;
             
             if (node_type == .leaf) {
-                const first = self.bvh_tree.nodes.get(node_idx).first;
-                const count = self.bvh_tree.nodes.get(node_idx).count;
-                const end_idx = @min(first + count, self.bvh_tree.indices.items.len);
+                const first = self.Bvh.nodes.get(node_idx).first;
+                const count = self.Bvh.nodes.get(node_idx).count;
+                const end_idx = @min(first + count, self.Bvh.indices.items.len);
                 for (first..end_idx) |i| {
-                    if (self.bvh_tree.items[self.bvh_tree.indices.items[i]].rayIntersect(ray_start, ray_dir, best_distance)) |hit| {
+                    if (self.Bvh.items[self.Bvh.indices.items[i]].rayIntersect(ray_start, ray_dir, best_distance)) |hit| {
                         if (hit.distance < best_distance) {
                             best_distance = hit.distance;
                             best_hit = hit;
@@ -120,9 +125,9 @@ pub const World = struct {
                     }
                 }
             } else {
-                const left = self.bvh_tree.nodes.get(node_idx).first;
-                if (left + 1 < self.bvh_tree.nodes.len) self.stack.appendAssumeCapacity(left + 1);
-                if (left < self.bvh_tree.nodes.len) self.stack.appendAssumeCapacity(left);
+                const left = self.Bvh.nodes.get(node_idx).first;
+                if (left + 1 < self.Bvh.nodes.len) self.stack.appendAssumeCapacity(left + 1);
+                if (left < self.Bvh.nodes.len) self.stack.appendAssumeCapacity(left);
             }
         }
         
@@ -137,40 +142,48 @@ pub fn Physics(comptime config: Config) type {
         pub const State = struct {
             pos: Vec3 = Vec3.zero(),
             vel: Vec3 = Vec3.zero(),
-            on_ground: bool = false,
+            grounded: bool = false,
             yaw: f32 = 0,
             pitch: f32 = 0,
-            jump_timer: f32 = 0,
-            jump_active: bool = false,
         };
         
         state: State = .{},
+        jump_sound: ?*const wav.Audio = null,
+        mixer: *wav.Mixer,
+        
+        pub fn init(mixer: *wav.Mixer) Self {
+            var self = Self{ .mixer = mixer };
+            // Load jump sound
+            self.jump_sound = mixer.load("assets/player/jump.wav") catch |err| blk: {
+                std.log.err("Failed to load jump sound: {}", .{err});
+                break :blk null;
+            };
+            return self;
+        }
         
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
+            // Apply friction before acceleration
+            if (self.state.grounded) self.friction(dt);
+            
             // Apply forces
-            if (!self.state.on_ground) self.state.vel.data[1] -= config.gravity * dt;
-            if (jump and self.state.on_ground) {
+            if (!self.state.grounded) self.state.vel.data[1] -= config.gravity * dt;
+            if (jump and self.state.grounded) {
                 self.state.vel.data[1] = config.jump_velocity;
-                self.state.jump_timer = config.jump_sound_duration;
-                self.state.jump_active = true;
+                if (self.jump_sound) |sound| {
+                    // Find free voice and play jump sound
+                    for (&self.mixer.voices) |*voice| {
+                        if (voice.audio == null) {
+                            voice.* = .{ .audio = sound, .volume = 1.0 };
+                            break;
+                        }
+                    }
+                }
             }
             
             self.accelerate(wish_dir, dt);
-            if (self.state.on_ground) self.friction(dt);
             
             // Move and handle collision
             self.move(world, Vec3.scale(self.state.vel, dt));
-        }
-        
-        pub fn getAudioSample(self: *Self, sample_rate: f32) f32 {
-            if (self.state.jump_active and self.state.jump_timer > 0) {
-                const t = 1.0 - self.state.jump_timer / config.jump_sound_duration;
-                self.state.jump_timer -= 1.0 / sample_rate;
-                const sample = @sin((config.jump_sound_duration - self.state.jump_timer) * config.audio_frequency * std.math.pi) * @exp(-t * config.audio_decay) * config.audio_amplitude;
-                if (self.state.jump_timer <= 0) self.state.jump_active = false;
-                return sample;
-            }
-            return 0.0;
         }
         
         fn accelerate(self: *Self, wish_dir: Vec3, dt: f32) void {
@@ -178,7 +191,7 @@ pub fn Physics(comptime config: Config) type {
             if (len < config.input_deadzone) return;
             
             const wish = Vec3.scale(wish_dir, 1.0 / len);
-            const max_vel = if (self.state.on_ground) config.max_speed * len else @min(config.max_speed * len, config.air_speed);
+            const max_vel = if (self.state.grounded) config.max_speed * len else @min(config.max_speed * len, config.air_speed);
             const current_vel = Vec3.dot(Vec3.new(self.state.vel.data[0], 0, self.state.vel.data[2]), wish);
             const accel = @min(config.acceleration * dt, @max(0, max_vel - current_vel));
             
@@ -199,9 +212,8 @@ pub fn Physics(comptime config: Config) type {
         }
         
         fn move(self: *Self, world: *World, delta: Vec3) void {
-            if (Vec3.length(delta) < config.epsilon) return;
             var vel = delta;
-            self.state.on_ground = false;
+            self.state.grounded = false;
             
             for (0..config.max_slide_iterations) |_| {
                 const len = Vec3.length(vel);
@@ -213,7 +225,7 @@ pub fn Physics(comptime config: Config) type {
                     const dot_vel = Vec3.dot(vel, hit.normal);
                     if (dot_vel >= 0) break;
                     
-                    if (hit.normal.data[1] > config.slope_limit) self.state.on_ground = true;
+                    if (hit.normal.data[1] > config.slope_limit) self.state.grounded = true;
                     
                     vel = Vec3.sub(vel, Vec3.scale(hit.normal, dot_vel));
                     
