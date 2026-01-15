@@ -144,8 +144,6 @@ pub fn Physics(comptime config: Config) type {
             jump_active: bool = false,
         };
         
-        pub const Move = struct { pos: Vec3, hit: ?brush.CollisionResult = null };
-        
         state: State = .{},
         
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
@@ -161,17 +159,7 @@ pub fn Physics(comptime config: Config) type {
             if (self.state.on_ground) self.friction(dt);
             
             // Move and handle collision
-            const move_result = self.move(world, self.state.pos, Vec3.scale(self.state.vel, dt));
-            self.state.pos = move_result.pos;
-            
-            // Update state from collision
-            if (move_result.hit) |hit| {
-                self.state.on_ground = hit.normal.data[1] > config.slope_limit;
-                const into_surface = Vec3.dot(self.state.vel, hit.normal);
-                if (into_surface < 0) self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, into_surface));
-            } else {
-                self.state.on_ground = false;
-            }
+            self.move(world, Vec3.scale(self.state.vel, dt));
         }
         
         pub fn getAudioSample(self: *Self, sample_rate: f32) f32 {
@@ -210,34 +198,32 @@ pub fn Physics(comptime config: Config) type {
             }
         }
         
-        pub fn move(self: *Self, world: *World, start: Vec3, delta: Vec3) Move {
-            _ = self;
-            if (Vec3.length(delta) < config.epsilon) return .{ .pos = start };
-            
-            var pos = start;
+        fn move(self: *Self, world: *World, delta: Vec3) void {
+            if (Vec3.length(delta) < config.epsilon) return;
             var vel = delta;
-            var first_hit: ?brush.CollisionResult = null;
+            self.state.on_ground = false;
             
-            for (0..config.max_slide_iterations) |bump| {
-                const move_length = Vec3.length(vel);
-                if (move_length < config.epsilon) break;
+            for (0..config.max_slide_iterations) |_| {
+                const len = Vec3.length(vel);
+                if (len < config.epsilon) break;
                 
-                if (world.raycast(pos, Vec3.normalize(vel), move_length)) |hit| {
-                    if (first_hit == null) first_hit = hit;
+                if (world.raycast(self.state.pos, Vec3.scale(vel, 1.0 / len), len)) |hit| {
+                    self.state.pos = Vec3.add(self.state.pos, Vec3.scale(vel, @max(0, hit.distance - config.margin) / len));
                     
-                    pos = Vec3.add(pos, Vec3.scale(Vec3.normalize(vel), @max(0, hit.distance - config.margin)));
+                    const dot_vel = Vec3.dot(vel, hit.normal);
+                    if (dot_vel >= 0) break;
                     
-                    const into_surface = Vec3.dot(vel, hit.normal);
-                    if (into_surface >= 0) break;
+                    if (hit.normal.data[1] > config.slope_limit) self.state.on_ground = true;
                     
-                    vel = Vec3.scale(Vec3.sub(vel, Vec3.scale(hit.normal, into_surface)), 
-                                   config.slide_damping - (@as(f32, @floatFromInt(bump)) * config.slide_damping_step));
+                    vel = Vec3.sub(vel, Vec3.scale(hit.normal, dot_vel));
+                    
+                    const dot_state = Vec3.dot(self.state.vel, hit.normal);
+                    if (dot_state < 0) self.state.vel = Vec3.sub(self.state.vel, Vec3.scale(hit.normal, dot_state));
                 } else {
-                    return .{ .pos = Vec3.add(pos, vel), .hit = first_hit };
+                    self.state.pos = Vec3.add(self.state.pos, vel);
+                    break;
                 }
             }
-            
-            return .{ .pos = pos, .hit = first_hit };
         }
     };
 }
