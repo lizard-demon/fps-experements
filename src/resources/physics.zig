@@ -2,7 +2,7 @@ const std = @import("std");
 const math = @import("math");
 const bvh = @import("../lib/bvh.zig");
 const brush = @import("../lib/brush.zig");
-const wav = @import("../lib/wav.zig");
+const audio = @import("../lib/audio.zig");
 
 const Vec3 = math.Vec3;
 
@@ -146,13 +146,13 @@ pub fn Physics(comptime config: Config) type {
         };
         
         state: State = .{},
-        jump_sound: ?*const wav.Audio = null,
-        mixer: *wav.Mixer,
+        jump_sound: ?*const audio.Audio = null,
+        mixer: *audio.Mixer,
         
-        pub fn init(mixer: *wav.Mixer) Self {
+        pub fn init(mixer: *audio.Mixer) Self {
             var self = Self{ .mixer = mixer };
             // Load jump sound
-            self.jump_sound = mixer.load("assets/player/jump.wav") catch |err| blk: {
+            self.jump_sound = mixer.load("assets/player/jump.pcm", 44100) catch |err| blk: {
                 std.log.err("Failed to load jump sound: {}", .{err});
                 break :blk null;
             };

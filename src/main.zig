@@ -9,7 +9,7 @@ const ig = @import("cimgui");
 const math = @import("math");
 const bvh = @import("lib/bvh.zig");
 const brush = @import("lib/brush.zig");
-const wav = @import("lib/wav.zig");
+const audio_lib = @import("lib/audio.zig");
 const physics_mod = @import("resources/physics.zig");
 
 const Vec3 = math.Vec3;
@@ -185,8 +185,8 @@ const EYE_HEIGHT: f32 = 0.6;
 // Global state
 var game: Game = undefined;
 var initialized: bool = false;
-var mixer: wav.Mixer = undefined;
-var background_music: ?*wav.Audio = null;
+var mixer: audio_lib.Mixer = undefined;
+var background_music: ?*audio_lib.Audio = null;
 
 export fn init() void {
     const allocator = std.heap.c_allocator;
@@ -194,10 +194,10 @@ export fn init() void {
     saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
     
-    mixer = wav.Mixer.init(allocator);
+    mixer = audio_lib.Mixer.init(allocator);
     
     // Load and start background music
-    background_music = mixer.load("assets/game/music.wav") catch |err| blk: {
+    background_music = mixer.load("assets/game/music.pcm", 44100) catch |err| blk: {
         std.log.err("Failed to load background music: {}", .{err});
         break :blk null;
     };
