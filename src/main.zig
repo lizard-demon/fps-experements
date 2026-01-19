@@ -10,6 +10,7 @@ const math = @import("math");
 const bvh = @import("lib/bvh.zig");
 const brush = @import("lib/brush.zig");
 const audio_lib = @import("lib/audio.zig");
+const map_lib = @import("lib/map.zig");
 const physics_mod = @import("resources/physics.zig");
 
 const Vec3 = math.Vec3;
@@ -20,6 +21,7 @@ const AABB = math.AABB;
 const Physics = physics_mod.Physics(.{});
 const Renderer = @import("resources/render.zig").Renderer(.{});
 const World = physics_mod.World;
+const Map = map_lib.Map;
 
 // Game state
 const Game = struct {
@@ -43,117 +45,24 @@ const Game = struct {
     renderer: Renderer = undefined,
     
     // World data
-    world: World = undefined,
-    plane_normals: [80]Vec3 = undefined,
-    plane_distances: [80]f32 = undefined,
-    brushes: [8]brush.Brush = undefined,
+    map: Map = undefined,
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
         self.physics = Physics.init(&mixer);
         self.renderer = Renderer.init(allocator);
         
-        var plane_idx: usize = 0;
-        var brush_idx: usize = 0;
-        
-        // 1. Massive ground platform
-        brush_idx += self.addBoxBrush(&plane_idx, Vec3.new(0, -2.25, 0), Vec3.new(100.0, 4.5, 100.0), brush_idx);
-        
-        // 2. Massive slope/mountain
-        brush_idx += self.addSlopeBrush(&plane_idx, brush_idx);
-        
-        // 3. Scattered structures
-        const structures = [_]struct { pos: Vec3, size: Vec3 }{
-            .{ .pos = Vec3.new(25, 3, 0), .size = Vec3.new(4, 6, 4) },
-            .{ .pos = Vec3.new(-25, 2, 15), .size = Vec3.new(6, 4, 6) },
-            .{ .pos = Vec3.new(0, 1, -30), .size = Vec3.new(8, 2, 3) },
-            .{ .pos = Vec3.new(-15, 4, -15), .size = Vec3.new(3, 8, 3) },
-            .{ .pos = Vec3.new(30, 1.5, 25), .size = Vec3.new(5, 3, 5) },
-        };
-        
-        for (structures) |structure| {
-            if (brush_idx >= self.brushes.len) break;
-            brush_idx += self.addBoxBrush(&plane_idx, structure.pos, structure.size, brush_idx);
-        }
-        
-        self.initializeWorld(brush_idx);
-    }
-    
-    fn addBoxBrush(self: *@This(), plane_idx: *usize, center: Vec3, size: Vec3, brush_idx: usize) u32 {
-        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.plane_normals.len) return 0;
-        
-        const half_size = Vec3.scale(size, 0.5);
-        const normals = [6]Vec3{
-            Vec3.new( 1,  0,  0), Vec3.new(-1,  0,  0),
-            Vec3.new( 0,  1,  0), Vec3.new( 0, -1,  0),
-            Vec3.new( 0,  0,  1), Vec3.new( 0,  0, -1),
-        };
-        const distances = [6]f32{
-            -(center.data[0] + half_size.data[0]), center.data[0] - half_size.data[0],
-            -(center.data[1] + half_size.data[1]), center.data[1] - half_size.data[1],
-            -(center.data[2] + half_size.data[2]), center.data[2] - half_size.data[2],
-        };
-        
-        @memcpy(self.plane_normals[plane_idx.*..plane_idx.* + 6], &normals);
-        @memcpy(self.plane_distances[plane_idx.*..plane_idx.* + 6], &distances);
-        
-        self.brushes[brush_idx] = .{ 
-            .planes = .{
-                .normals = self.plane_normals[plane_idx.*..plane_idx.* + 6],
-                .distances = self.plane_distances[plane_idx.*..plane_idx.* + 6],
-            },
-            .bounds = AABB.new(Vec3.sub(center, half_size), Vec3.add(center, half_size))
-        };
-        plane_idx.* += 6;
-        return 1;
-    }
-    
-    fn addSlopeBrush(self: *@This(), plane_idx: *usize, brush_idx: usize) u32 {
-        if (brush_idx >= self.brushes.len or plane_idx.* + 6 > self.plane_normals.len) return 0;
-        
-        const slope_width = 30.0;
-        const slope_height = 20.0;
-        const slope_center = Vec3.new(0, 0, 20.0);
-        const slope_angle = 46.0 * (std.math.pi / 180.0);
-        
-        const slope_normal = Vec3.normalize(Vec3.new(0, @cos(slope_angle), -@sin(slope_angle)));
-        const slope_point = Vec3.new(0, slope_height, slope_center.data[2] + slope_width/2);
-        
-        const normals = [6]Vec3{
-            Vec3.new( 0, -1,  0), Vec3.new(-1,  0,  0), Vec3.new( 1,  0,  0),
-            Vec3.new( 0,  0, -1), Vec3.new( 0,  0,  1), slope_normal,
-        };
-        const distances = [6]f32{
-            0.0, -slope_width/2, -slope_width/2,
-            slope_center.data[2] - slope_width/2, -(slope_center.data[2] + slope_width/2),
-            -Vec3.dot(slope_normal, slope_point),
-        };
-        
-        @memcpy(self.plane_normals[plane_idx.*..plane_idx.* + 6], &normals);
-        @memcpy(self.plane_distances[plane_idx.*..plane_idx.* + 6], &distances);
-        
-        self.brushes[brush_idx] = .{ 
-            .planes = .{
-                .normals = self.plane_normals[plane_idx.*..plane_idx.* + 6],
-                .distances = self.plane_distances[plane_idx.*..plane_idx.* + 6],
-            },
-            .bounds = AABB.new(
-                Vec3.new(-slope_width/2, 0.0, slope_center.data[2] - slope_width/2), 
-                Vec3.new(slope_width/2, slope_height, slope_center.data[2] + slope_width/2)
-            )
-        };
-        plane_idx.* += 6;
-        return 1;
-    }
-    
-    fn initializeWorld(self: *@This(), brush_count: usize) void {
-        self.world = World.init(self.brushes[0..brush_count], self.allocator) catch |err| {
-            std.log.err("Failed to initialize world: {}", .{err});
+        // Load map from JSON file
+        self.map = Map.loadFromFile(allocator, "assets/game/map/test.json") catch |err| {
+            std.log.err("Failed to load map: {}", .{err});
+            // Create a minimal fallback map
+            self.createFallbackMap(allocator);
             return;
         };
         
-        std.log.info("Created {} brushes", .{brush_count});
-        for (self.brushes[0..brush_count], 0..) |b, i| {
+        std.log.info("Loaded map: {s}", .{self.map.data.name});
+        std.log.info("Created {} brushes", .{self.map.brushes.len});
+        for (self.map.brushes, 0..) |b, i| {
             std.log.info("  Brush {}: {} planes, bounds: ({d:.1},{d:.1},{d:.1}) to ({d:.1},{d:.1},{d:.1})", .{
                 i, b.planes.len(),
                 b.bounds.min.data[0], b.bounds.min.data[1], b.bounds.min.data[2],
@@ -162,17 +71,37 @@ const Game = struct {
         }
     }
     
+    fn createFallbackMap(self: *@This(), allocator: std.mem.Allocator) void {
+        // Create a simple ground plane as fallback
+        const fallback_brushes = allocator.alloc(map_lib.BrushData, 1) catch {
+            std.log.err("Failed to allocate fallback brushes", .{});
+            return;
+        };
+        defer allocator.free(fallback_brushes);
+        
+        fallback_brushes[0] = .{ .box = .{
+            .position = .{ 0.0, -2.25, 0.0 },
+            .size = .{ 100.0, 4.5, 100.0 }
+        }};
+        
+        const fallback_data = map_lib.MapData{
+            .name = "Fallback Map",
+            .spawn_position = .{ 0.0, 3.0, 0.0 },
+            .brushes = fallback_brushes,
+        };
+        
+        self.map = Map.loadFromData(allocator, fallback_data) catch |err| {
+            std.log.err("Failed to create fallback map: {}", .{err});
+            return;
+        };
+    }
+    
     fn buildWorldMesh(self: *@This()) !void {
-        // Find the actual number of brushes used
-        var brush_count: usize = 0;
-        for (self.brushes) |b| {
-            if (b.planes.len() > 0) brush_count += 1;
-        }
-        try self.renderer.buildWorldMesh(self.brushes[0..brush_count]);
+        try self.renderer.buildWorldMesh(self.map.brushes);
     }
     
     fn deinit(self: *@This()) void {
-        self.world.deinit();
+        self.map.deinit();
         self.renderer.deinit();
     }
 };
@@ -219,8 +148,8 @@ export fn init() void {
         std.log.err("Failed to build world mesh: {}", .{err});
     };
     
-    // Set initial player position
-    game.physics.state.pos = Vec3.new(0.0, 3.0, -20.0);
+    // Set initial player position from map
+    game.physics.state.pos = game.map.getSpawnPosition();
     
     initialized = true;
 }
@@ -240,7 +169,7 @@ export fn frame() void {
     const wish_dir = math.wishdir(fwd, right, game.physics.state.yaw);
     
     // Update physics
-    game.physics.update(&game.world, wish_dir, game.keys.sp, game.delta_time);
+    game.physics.update(&game.map.world, wish_dir, game.keys.sp, game.delta_time);
     
     // Render
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
