@@ -7,7 +7,6 @@ const AABB = math.AABB;
 const Config = struct {
     traversal_cost: f32 = 0.3,
     max_leaf_size: u32 = 4,
-    epsilon: f32 = std.math.floatEps(f32),
     split_candidates: u32 = 8,
     max_stack_depth: u32 = 64,
     layout_queue_initial_size: u32 = 512,
@@ -151,7 +150,7 @@ pub fn BVH(comptime T: type) type {
                 const axis_min = bounds.min.data[axis];
                 const axis_max = bounds.max.data[axis];
                 const axis_range = axis_max - axis_min;
-                if (axis_range <= config.epsilon) continue;
+                if (axis_range <= std.math.floatEpsAt(f32, axis_range)) continue;
                 
                 const step = axis_range / @as(f32, @floatFromInt(config.split_candidates));
                 for (0..config.split_candidates) |candidate| {

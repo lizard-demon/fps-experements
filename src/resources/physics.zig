@@ -37,7 +37,6 @@ pub const Config = struct {
     audio_amplitude: f32 = 0.3,
     
     // Thresholds
-    input_deadzone: f32 = std.math.floatEps(f32),
     friction_threshold: f32 = 0.1,
 };
 
@@ -187,7 +186,7 @@ pub fn Physics(comptime config: Config) type {
         
         fn accelerate(self: *Self, wish_dir: Vec3, dt: f32) void {
             const len = @sqrt(wish_dir.data[0] * wish_dir.data[0] + wish_dir.data[2] * wish_dir.data[2]);
-            if (len < config.input_deadzone) return;
+            if (len < std.math.floatEpsAt(f32, len)) return;
             
             const wish = Vec3.scale(wish_dir, 1.0 / len);
             const max_vel = if (self.state.grounded) config.max_speed * len else @min(config.max_speed * len, config.air_speed);
@@ -216,7 +215,7 @@ pub fn Physics(comptime config: Config) type {
             
             for (0..config.max_slide_iterations) |_| {
                 const len = Vec3.length(vel);
-                if (len < std.math.floatEps(f32)) break;
+                if (len < std.math.floatEpsAt(f32, len)) break;
                 
                 // Prevent tunneling by ensuring minimum raycast distance
                 const min_raycast_dist = config.margin * 2.0;
