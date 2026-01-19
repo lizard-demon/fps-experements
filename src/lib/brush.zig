@@ -4,13 +4,13 @@ const math = @import("math");
 const Vec3 = math.Vec3;
 const AABB = math.AABB;
 
+const eps = std.math.floatEps(f32);
+
 pub const Plane = struct { normal: Vec3, distance: f32 };
 
 pub const Planes = struct {
     normals: []const Vec3,
     distances: []const f32,
-    
-    const parallel_epsilon: f32 = 0.0001;
     
     pub fn len(self: Planes) usize {
         return self.normals.len;
@@ -25,7 +25,7 @@ pub const Planes = struct {
         const distance = self.distances[index];
         
         const denom = Vec3.dot(normal, ray_dir);
-        if (@abs(denom) < parallel_epsilon) return null; // Ray parallel to plane
+        if (@abs(denom) < eps) return null; // Ray parallel to plane
         
         const t = -(Vec3.dot(normal, ray_start) + distance) / denom;
         return if (t >= 0) t else null;
@@ -88,7 +88,7 @@ pub const Brush = struct {
             }
         }
         
-        if (entry_time <= exit_time and entry_time <= max_distance) {
+        if (entry_time <= exit_time and entry_time <= max_distance and entry_time >= eps) {
             return Plane{ .normal = hit_normal, .distance = entry_time };
         }
         

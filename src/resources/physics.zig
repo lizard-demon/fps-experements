@@ -16,7 +16,6 @@ pub const Config = struct {
     friction: f32 = 5.0,
     
     // Collision detection
-    epsilon: f32 = 0.001,
     margin: f32 = 0.02,
     slope_limit: f32 = 0.707, // 45 degrees
     slide_damping: f32 = 0.95,
@@ -38,7 +37,7 @@ pub const Config = struct {
     audio_amplitude: f32 = 0.3,
     
     // Thresholds
-    input_deadzone: f32 = 0.001,
+    input_deadzone: f32 = std.math.floatEps(f32),
     friction_threshold: f32 = 0.1,
 };
 
@@ -217,9 +216,13 @@ pub fn Physics(comptime config: Config) type {
             
             for (0..config.max_slide_iterations) |_| {
                 const len = Vec3.length(vel);
-                if (len < config.epsilon) break;
+                if (len < std.math.floatEps(f32)) break;
                 
-                if (world.raycast(self.state.pos, Vec3.scale(vel, 1.0 / len), len)) |hit| {
+                // Prevent tunneling by ensuring minimum raycast distance
+                const min_raycast_dist = config.margin * 2.0;
+                const raycast_len = @max(len, min_raycast_dist);
+                
+                if (world.raycast(self.state.pos, Vec3.scale(vel, 1.0 / len), raycast_len)) |hit| {
                     self.state.pos = Vec3.add(self.state.pos, Vec3.scale(vel, @max(0, hit.distance - config.margin) / len));
                     
                     const dot_vel = Vec3.dot(vel, hit.normal);
