@@ -30,6 +30,18 @@ pub const Planes = struct {
     }
 };
 
+// Simple mesh structure for brush geometry
+pub const BrushMesh = struct {
+    vertices: []Vec3,
+    indices: []u16,
+    allocator: std.mem.Allocator,
+    
+    pub fn deinit(self: *BrushMesh) void {
+        self.allocator.free(self.vertices);
+        self.allocator.free(self.indices);
+    }
+};
+
 pub const Brush = struct {
     planes: Planes,
     bounds: AABB,
@@ -92,4 +104,134 @@ pub const Brush = struct {
         
         return null;
     }
+    
+    pub fn generateMesh(self: Brush, allocator: std.mem.Allocator) !BrushMesh {
+        // Find all vertices by intersecting three planes
+        var hull_vertices = std.ArrayListUnmanaged(Vec3){};
+        defer hull_vertices.deinit(allocator);
+        
+        for (0..self.planes.len()) |i| {
+            for (i + 1..self.planes.len()) |j| {
+                for (j + 1..self.planes.len()) |k| {
+                    if (intersectThreePlanes(self.planes, i, j, k)) |vertex| {
+                        // Check if vertex is inside brush and not duplicate
+                        if (isVertexInsideBrush(vertex, self.planes) and !isDuplicateVertex(vertex, hull_vertices.items)) {
+                            try hull_vertices.append(allocator, vertex);
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (hull_vertices.items.len < 4) {
+            return BrushMesh{
+                .vertices = &[_]Vec3{},
+                .indices = &[_]u16{},
+                .allocator = allocator,
+            };
+        }
+        
+        // Generate convex hull faces
+        const hull_faces = try generateConvexHullFaces(hull_vertices.items, allocator);
+        defer allocator.free(hull_faces);
+        
+        // Copy vertices and indices
+        const vertices = try allocator.dupe(Vec3, hull_vertices.items);
+        var indices = std.ArrayListUnmanaged(u16){};
+        
+        for (hull_faces) |face| {
+            try indices.append(allocator, face[0]);
+            try indices.append(allocator, face[1]);
+            try indices.append(allocator, face[2]);
+        }
+        
+        return BrushMesh{
+            .vertices = vertices,
+            .indices = try indices.toOwnedSlice(allocator),
+            .allocator = allocator,
+        };
+    }
 };
+
+fn intersectThreePlanes(planes: Planes, i: usize, j: usize, k: usize) ?Vec3 {
+    const n1 = planes.normals[i];
+    const n2 = planes.normals[j];
+    const n3 = planes.normals[k];
+    const d1 = planes.distances[i];
+    const d2 = planes.distances[j];
+    const d3 = planes.distances[k];
+    
+    const det = Vec3.dot(n1, Vec3.cross(n2, n3));
+    if (@abs(det) < 0.001) return null;
+    
+    const c1 = Vec3.cross(n2, n3);
+    const c2 = Vec3.cross(n3, n1);
+    const c3 = Vec3.cross(n1, n2);
+    
+    return Vec3.scale(Vec3.add(Vec3.add(Vec3.scale(c1, -d1), Vec3.scale(c2, -d2)), Vec3.scale(c3, -d3)), 1.0 / det);
+}
+
+fn isVertexInsideBrush(vertex: Vec3, planes: Planes) bool {
+    for (0..planes.len()) |plane_idx| {
+        if (planes.distanceToPoint(plane_idx, vertex) > 0.001) return false;
+    }
+    return true;
+}
+
+fn isDuplicateVertex(vertex: Vec3, existing: []Vec3) bool {
+    for (existing) |existing_vertex| {
+        if (Vec3.dist(vertex, existing_vertex) < 0.01) return true;
+    }
+    return false;
+}
+
+fn generateConvexHullFaces(vertices: []Vec3, allocator: std.mem.Allocator) ![][3]u16 {
+    if (vertices.len < 4) return &[_][3]u16{};
+    
+    var faces = std.ArrayListUnmanaged([3]u16){};
+    
+    // Simple approach: test all triangles, keep those that are hull faces
+    for (0..vertices.len) |i| {
+        for (i + 1..vertices.len) |j| {
+            for (j + 1..vertices.len) |k| {
+                const v0 = vertices[i];
+                const v1 = vertices[j]; 
+                const v2 = vertices[k];
+                
+                const edge1 = Vec3.sub(v1, v0);
+                const edge2 = Vec3.sub(v2, v0);
+                const normal = Vec3.cross(edge1, edge2);
+                
+                if (Vec3.length(normal) < 0.001) continue;
+                
+                // Check if all other vertices are on one side of this triangle
+                var is_hull_face = true;
+                var side_sign: ?f32 = null;
+                
+                for (vertices, 0..) |test_vertex, idx| {
+                    if (idx == i or idx == j or idx == k) continue;
+                    
+                    const dot = Vec3.dot(normal, Vec3.sub(test_vertex, v0));
+                    if (@abs(dot) > 0.001) {
+                        if (side_sign == null) {
+                            side_sign = dot;
+                        } else if (side_sign.? * dot < 0) {
+                            is_hull_face = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if (is_hull_face) {
+                    const face: [3]u16 = if ((side_sign orelse 1) > 0) 
+                        .{ @intCast(i), @intCast(k), @intCast(j) }
+                    else 
+                        .{ @intCast(i), @intCast(j), @intCast(k) };
+                    try faces.append(allocator, face);
+                }
+            }
+        }
+    }
+    
+    return try faces.toOwnedSlice(allocator);
+}

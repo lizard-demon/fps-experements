@@ -19,7 +19,8 @@ const AABB = math.AABB;
 
 // Module types
 const Physics = physics_mod.Physics(.{});
-const Renderer = @import("resources/render.zig").Renderer(.{});
+const render_mod = @import("resources/render.zig");
+const Renderer = render_mod.Renderer(.{});
 const World = physics_mod.World;
 const Map = map_lib.Map;
 
@@ -50,7 +51,21 @@ const Game = struct {
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
         self.physics = Physics.init(&mixer);
-        self.renderer = Renderer.init(allocator);
+        
+        // Initialize renderer with better error handling
+        self.renderer = Renderer.init(allocator) catch |err| {
+            std.log.err("Failed to initialize renderer: {}", .{err});
+            switch (err) {
+                error.NoTexturesFound => {
+                    std.log.err("Make sure you have texture files in assets/textures/", .{});
+                    std.log.err("Run: ./tools/formatting/textures.sh to convert PNG files", .{});
+                },
+                else => {},
+            }
+            // Create a minimal fallback renderer or exit gracefully
+            std.log.err("Cannot continue without renderer. Exiting.", .{});
+            std.process.exit(1);
+        };
         
         // Load map from JSON file
         self.map = Map.loadFromFile(allocator, "assets/game/map/test.json") catch |err| {
@@ -97,20 +112,21 @@ const Game = struct {
     }
     
     fn buildWorldMesh(self: *@This()) !void {
-        // Add brushes to renderer
+        // Use the actual texture file we have: test.rgba
+        const texture_name = "test";
+        
+        // Add brushes to renderer with the test texture
         for (self.map.brushes) |b| {
-            try self.renderer.addBrush(b, .{ 0.4, 0.4, 0.4, 1.0 }); // Default brush color
+            try self.renderer.addBrush(b, .{ 0.8, 0.8, 0.8, 1.0 }, texture_name);
         }
         
-        // Add a model in front of the player spawn (player spawns at 0,3,-20)
-        // Auto-scale to 3 units and position it in front of spawn
-        const model_position = Vec3.new(0.0, 5.0, -15.0); // In front of spawn, higher up
-        const model_color = [4]f32{ 1.0, 0.2, 0.2, 1.0 }; // Bright red for visibility
-        self.renderer.addObjModelAutoScale("assets/cube.obj", model_color, model_position, 3.0) catch |err| {
-            std.log.warn("Failed to load cube.obj: {}", .{err});
+        // Add model with the same texture - handle missing file gracefully
+        const model_position = Vec3.new(0.0, 5.0, -15.0);
+        const model_color = [4]f32{ 1.0, 1.0, 1.0, 1.0 };
+        self.renderer.addObjModelAutoScale("assets/cube.obj", model_color, model_position, 3.0, texture_name) catch |err| {
+            std.log.warn("Failed to load cube.obj: {} (continuing without model)", .{err});
         };
         
-        // Build GPU buffers and BVH
         try self.renderer.buildBuffers();
     }
     
