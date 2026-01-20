@@ -97,7 +97,21 @@ const Game = struct {
     }
     
     fn buildWorldMesh(self: *@This()) !void {
-        try self.renderer.buildWorldMesh(self.map.brushes);
+        // Add brushes to renderer
+        for (self.map.brushes) |b| {
+            try self.renderer.addBrush(b, .{ 0.4, 0.4, 0.4, 1.0 }); // Default brush color
+        }
+        
+        // Add a model in front of the player spawn (player spawns at 0,3,-20)
+        // Auto-scale to 3 units and position it in front of spawn
+        const model_position = Vec3.new(0.0, 5.0, -15.0); // In front of spawn, higher up
+        const model_color = [4]f32{ 1.0, 0.2, 0.2, 1.0 }; // Bright red for visibility
+        self.renderer.addObjModelAutoScale("assets/cube.obj", model_color, model_position, 3.0) catch |err| {
+            std.log.warn("Failed to load cube.obj: {}", .{err});
+        };
+        
+        // Build GPU buffers and BVH
+        try self.renderer.buildBuffers();
     }
     
     fn deinit(self: *@This()) void {

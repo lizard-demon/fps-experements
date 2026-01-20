@@ -122,6 +122,13 @@ pub const Mat4 = struct {
         return .{ x, y, z, w };
     }
 
+    pub inline fn mulVec3(m: Mat4, v: Vec3) Vec3 {
+        const x = m.data[0] * v.data[0] + m.data[4] * v.data[1] + m.data[8] * v.data[2] + m.data[12];
+        const y = m.data[1] * v.data[0] + m.data[5] * v.data[1] + m.data[9] * v.data[2] + m.data[13];
+        const z = m.data[2] * v.data[0] + m.data[6] * v.data[1] + m.data[10] * v.data[2] + m.data[14];
+        return Vec3.new(x, y, z);
+    }
+
     pub inline fn translate(v: Vec3) Mat4 {
         return .{ .data = .{ 
             1, 0, 0, 0, 
