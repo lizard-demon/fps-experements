@@ -14,7 +14,6 @@ echo "Converting textures from $INPUT_DIR to $OUTPUT_DIR"
 # Check if ImageMagick is installed
 if ! command -v magick &> /dev/null; then
     echo "Error: ImageMagick is not installed."
-    echo "Install with: brew install imagemagick (macOS) or apt install imagemagick (Linux)"
     exit 1
 fi
 

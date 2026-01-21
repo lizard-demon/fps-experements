@@ -9,17 +9,23 @@ pub const Registry = struct {
     atlas_size: u32 = 0,
     texture_map: std.StringHashMap([2]f32),
     
-    pub fn init(allocator: std.mem.Allocator) !Registry {
-        var registry = Registry{
+    pub fn init(allocator: std.mem.Allocator) Registry {
+        return .{
             .allocator = allocator,
             .texture_map = std.StringHashMap([2]f32).init(allocator),
         };
-        
-        // Load all .rgba files from assets/textures
-        var dir = std.fs.cwd().openDir("assets/textures", .{ .iterate = true }) catch |err| {
-            std.log.err("Could not open texture directory: assets/textures ({})", .{err});
-            return err;
-        };
+    }
+    
+    pub fn deinit(self: *Registry) void {
+        var iterator = self.texture_map.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.texture_map.deinit();
+    }
+    
+    pub fn loadDirectory(self: *Registry, dir_path: []const u8) !void {
+        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
         defer dir.close();
         
         // Collect textures
@@ -33,10 +39,10 @@ pub const Registry = struct {
         }){};
         defer {
             for (textures.items) |tex| {
-                allocator.free(tex.name);
-                allocator.free(tex.pixels);
+                self.allocator.free(tex.name);
+                self.allocator.free(tex.pixels);
             }
-            textures.deinit(allocator);
+            textures.deinit(self.allocator);
         }
         
         var iterator = dir.iterate();
@@ -52,12 +58,12 @@ pub const Registry = struct {
             const sizes = [_]u32{ 16, 32, 64, 100, 128, 256, 512, 1024 };
             for (sizes) |size| {
                 if (file_size == size * size * 4) {
-                    const pixels = allocator.alloc(u32, size * size) catch continue;
+                    const pixels = self.allocator.alloc(u32, size * size) catch continue;
                     file.seekTo(0) catch continue;
                     if ((file.readAll(std.mem.sliceAsBytes(pixels)) catch 0) == file_size) {
                         const name_end = std.mem.lastIndexOf(u8, entry.name, ".") orelse entry.name.len;
-                        const name = allocator.dupe(u8, entry.name[0..name_end]) catch continue;
-                        try textures.append(allocator, .{
+                        const name = self.allocator.dupe(u8, entry.name[0..name_end]) catch continue;
+                        try textures.append(self.allocator, .{
                             .name = name,
                             .pixels = pixels,
                             .width = size,
@@ -65,7 +71,7 @@ pub const Registry = struct {
                         });
                         break;
                     }
-                    allocator.free(pixels);
+                    self.allocator.free(pixels);
                 }
             }
         }
@@ -97,8 +103,8 @@ pub const Registry = struct {
         }
         
         // Create atlas
-        var atlas_pixels = try allocator.alloc(u32, atlas_size * atlas_size);
-        defer allocator.free(atlas_pixels);
+        var atlas_pixels = try self.allocator.alloc(u32, atlas_size * atlas_size);
+        defer self.allocator.free(atlas_pixels);
         @memset(atlas_pixels, 0xFF000000);
         
         for (textures.items) |tex| {
@@ -113,12 +119,12 @@ pub const Registry = struct {
             // Store UV coordinates
             const uv_x = @as(f32, @floatFromInt(tex.atlas_x)) / @as(f32, @floatFromInt(atlas_size));
             const uv_y = @as(f32, @floatFromInt(tex.atlas_y)) / @as(f32, @floatFromInt(atlas_size));
-            const owned_name = try allocator.dupe(u8, tex.name);
-            try registry.texture_map.put(owned_name, .{ uv_x, uv_y });
+            const owned_name = try self.allocator.dupe(u8, tex.name);
+            try self.texture_map.put(owned_name, .{ uv_x, uv_y });
         }
         
         // Create GPU texture
-        registry.atlas_texture = sg.makeImage(.{
+        self.atlas_texture = sg.makeImage(.{
             .width = @intCast(atlas_size),
             .height = @intCast(atlas_size),
             .data = init: {
@@ -128,18 +134,8 @@ pub const Registry = struct {
             },
         });
         
-        registry.atlas_view = sg.makeView(.{ .texture = .{ .image = registry.atlas_texture } });
-        registry.atlas_size = atlas_size;
-        
-        return registry;
-    }
-    
-    pub fn deinit(self: *Registry) void {
-        var iterator = self.texture_map.iterator();
-        while (iterator.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.texture_map.deinit();
+        self.atlas_view = sg.makeView(.{ .texture = .{ .image = self.atlas_texture } });
+        self.atlas_size = atlas_size;
     }
     
     pub fn getAtlasUV(self: *const Registry, texture_name: []const u8) [2]f32 {

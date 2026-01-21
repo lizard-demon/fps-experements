@@ -148,9 +148,15 @@ pub fn Renderer(comptime config: Config) type {
         frame_count: u32 = 0,
         
         pub fn init(allocator: std.mem.Allocator) !Self {
+            var texture_registry = TextureRegistry.init(allocator);
+            texture_registry.loadDirectory("assets/textures") catch |err| {
+                std.log.err("Failed to load textures: {}", .{err});
+                return err;
+            };
+            
             var renderer = Self{ 
                 .allocator = allocator,
-                .texture_registry = try TextureRegistry.init(allocator),
+                .texture_registry = texture_registry,
             };
             renderer.initPipeline();
             return renderer;
