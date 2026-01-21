@@ -59,8 +59,9 @@ pub const Registry = struct {
             
             const file_size = file.getEndPos() catch continue;
             
-            // Try common texture sizes
-            const sizes = [_]u32{ 16, 32, 64, 100, 128, 256, 512, 1024 };
+            // Try common texture sizes including the actual sizes of our texture files
+            const sizes = [_]u32{ 16, 32, 64, 100, 128, 256, 350, 512, 612, 1024 };
+            var found_texture = false;
             for (sizes) |size| {
                 if (file_size == size * size * 4) {
                     const pixels = self.allocator.alloc(u32, size * size) catch continue;
@@ -74,10 +75,16 @@ pub const Registry = struct {
                             .width = size,
                             .height = size,
                         });
+                        std.log.info("Loaded texture '{s}': {}x{} ({} bytes)", .{ name, size, size, file_size });
+                        found_texture = true;
                         break;
                     }
                     self.allocator.free(pixels);
                 }
+            }
+            
+            if (!found_texture) {
+                std.log.warn("Skipping texture '{s}': size {} bytes doesn't match expected square format", .{ entry.name, file_size });
             }
         }
         

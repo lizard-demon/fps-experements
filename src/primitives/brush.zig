@@ -30,9 +30,15 @@ pub const Planes = struct {
     }
 };
 
+// Vertex with position and UV coordinates
+pub const BrushVertex = struct {
+    position: Vec3,
+    uv: [2]f32,
+};
+
 // Simple mesh structure for brush geometry
 pub const BrushMesh = struct {
-    vertices: []Vec3,
+    vertices: []BrushVertex,
     indices: []u16,
     allocator: std.mem.Allocator,
     
@@ -125,28 +131,52 @@ pub const Brush = struct {
         
         if (hull_vertices.items.len < 4) {
             return BrushMesh{
-                .vertices = &[_]Vec3{},
+                .vertices = &[_]BrushVertex{},
                 .indices = &[_]u16{},
                 .allocator = allocator,
             };
         }
         
-        // Generate convex hull faces
+        // Generate convex hull faces with proper UV coordinates
         const hull_faces = try generateConvexHullFaces(hull_vertices.items, allocator);
         defer allocator.free(hull_faces);
         
-        // Copy vertices and indices
-        const vertices = try allocator.dupe(Vec3, hull_vertices.items);
-        var indices = std.ArrayListUnmanaged(u16){};
+        // Generate vertices with UV coordinates
+        var vertices_with_uv = std.ArrayListUnmanaged(BrushVertex){};
+        defer vertices_with_uv.deinit(allocator);
         
+        var indices = std.ArrayListUnmanaged(u16){};
+        defer indices.deinit(allocator);
+        
+        // Process each face to generate proper UV coordinates
         for (hull_faces) |face| {
-            try indices.append(allocator, face[0]);
-            try indices.append(allocator, face[1]);
-            try indices.append(allocator, face[2]);
+            const v0 = hull_vertices.items[face[0]];
+            const v1 = hull_vertices.items[face[1]];
+            const v2 = hull_vertices.items[face[2]];
+            
+            // Calculate face normal
+            const edge1 = Vec3.sub(v1, v0);
+            const edge2 = Vec3.sub(v2, v0);
+            const face_normal = Vec3.normalize(Vec3.cross(edge1, edge2));
+            
+            // Generate UV coordinates for this face
+            const uv_coords = generateFaceUVs(v0, v1, v2, face_normal);
+            
+            // Add vertices with UV coordinates
+            const base_idx = @as(u16, @intCast(vertices_with_uv.items.len));
+            
+            try vertices_with_uv.append(allocator, .{ .position = v0, .uv = uv_coords[0] });
+            try vertices_with_uv.append(allocator, .{ .position = v1, .uv = uv_coords[1] });
+            try vertices_with_uv.append(allocator, .{ .position = v2, .uv = uv_coords[2] });
+            
+            // Add indices
+            try indices.append(allocator, base_idx);
+            try indices.append(allocator, base_idx + 1);
+            try indices.append(allocator, base_idx + 2);
         }
         
         return BrushMesh{
-            .vertices = vertices,
+            .vertices = try vertices_with_uv.toOwnedSlice(allocator),
             .indices = try indices.toOwnedSlice(allocator),
             .allocator = allocator,
         };
@@ -183,6 +213,61 @@ fn isDuplicateVertex(vertex: Vec3, existing: []Vec3) bool {
         if (Vec3.dist(vertex, existing_vertex) < 0.01) return true;
     }
     return false;
+}
+
+fn generateFaceUVs(v0: Vec3, v1: Vec3, v2: Vec3, face_normal: Vec3) [3][2]f32 {
+    // Texture scale configuration - easily adjustable
+    const TextureConfig = struct {
+        // How many world units per texture repeat
+        // Smaller values = larger textures, larger values = smaller textures
+        scale: f32 = 4.0, // 4 world units = 1 texture repeat
+        
+        // Minimum texture size to prevent over-stretching on small faces
+        min_scale: f32 = 0.1,
+        // Maximum texture size to prevent under-sampling on large faces  
+        max_scale: f32 = 1.0,
+    };
+    const config = TextureConfig{};
+    
+    // Calculate texture scale (inverse of world units per texture)
+    const texture_scale = 1.0 / config.scale;
+    
+    // Choose the best projection plane based on face normal
+    // This ensures textures don't get stretched on angled surfaces
+    const abs_normal = Vec3.new(@abs(face_normal.data[0]), @abs(face_normal.data[1]), @abs(face_normal.data[2]));
+    
+    var u_axis: Vec3 = undefined;
+    var v_axis: Vec3 = undefined;
+    
+    if (abs_normal.data[2] >= abs_normal.data[0] and abs_normal.data[2] >= abs_normal.data[1]) {
+        // Face is mostly Z-aligned, project onto XY plane
+        u_axis = Vec3.new(1.0, 0.0, 0.0);
+        v_axis = Vec3.new(0.0, 1.0, 0.0);
+    } else if (abs_normal.data[1] >= abs_normal.data[0]) {
+        // Face is mostly Y-aligned, project onto XZ plane
+        u_axis = Vec3.new(1.0, 0.0, 0.0);
+        v_axis = Vec3.new(0.0, 0.0, 1.0);
+    } else {
+        // Face is mostly X-aligned, project onto YZ plane
+        u_axis = Vec3.new(0.0, 1.0, 0.0);
+        v_axis = Vec3.new(0.0, 0.0, 1.0);
+    }
+    
+    // Ensure axes are perpendicular to face normal (Gram-Schmidt orthogonalization)
+    // This prevents texture distortion on angled surfaces
+    const u_dot = Vec3.dot(u_axis, face_normal);
+    const v_dot = Vec3.dot(v_axis, face_normal);
+    
+    u_axis = Vec3.normalize(Vec3.sub(u_axis, Vec3.scale(face_normal, u_dot)));
+    v_axis = Vec3.normalize(Vec3.sub(v_axis, Vec3.scale(face_normal, v_dot)));
+    
+    // Generate UV coordinates by projecting vertices onto the texture plane
+    // The texture will tile seamlessly across large surfaces
+    return [3][2]f32{
+        .{ Vec3.dot(v0, u_axis) * texture_scale, Vec3.dot(v0, v_axis) * texture_scale },
+        .{ Vec3.dot(v1, u_axis) * texture_scale, Vec3.dot(v1, v_axis) * texture_scale },
+        .{ Vec3.dot(v2, u_axis) * texture_scale, Vec3.dot(v2, v_axis) * texture_scale },
+    };
 }
 
 fn generateConvexHullFaces(vertices: []Vec3, allocator: std.mem.Allocator) ![][3]u16 {

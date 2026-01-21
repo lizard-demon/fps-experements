@@ -3,17 +3,25 @@ const math = @import("math");
 
 const Vec3 = math.Vec3;
 
-pub const BrushData = union(enum) {
-    box: struct {
-        position: [3]f32,
-        size: [3]f32,
+pub const BrushData = struct {
+    // Use owned strings to avoid lifetime issues
+    texture: []u8, // Owned string
+    data: union(enum) {
+        box: struct {
+            position: [3]f32,
+            size: [3]f32,
+        },
+        slope: struct {
+            position: [3]f32,
+            width: f32,
+            height: f32,
+            angle: f32,
+        },
     },
-    slope: struct {
-        position: [3]f32,
-        width: f32,
-        height: f32,
-        angle: f32,
-    },
+    
+    pub fn deinit(self: *BrushData, allocator: std.mem.Allocator) void {
+        allocator.free(self.texture);
+    }
 };
 
 pub const Data = struct {
@@ -39,7 +47,10 @@ pub const Registry = struct {
     }
     
     pub fn deinit(self: *Registry) void {
-        for (self.maps.items) |map_data| {
+        for (self.maps.items) |*map_data| {
+            for (map_data.brushes) |*brush| {
+                brush.deinit(self.allocator);
+            }
             self.allocator.free(map_data.brushes);
         }
         self.maps.deinit(self.allocator);
@@ -65,6 +76,7 @@ pub const Registry = struct {
                 width: ?f32 = null,
                 height: ?f32 = null,
                 angle: ?f32 = null,
+                texture: ?[]const u8 = null, // Optional texture field
             },
         };
         
@@ -75,18 +87,27 @@ pub const Registry = struct {
         const brush_data = try self.allocator.alloc(BrushData, parsed.value.brushes.len);
         
         for (parsed.value.brushes, 0..) |json_brush, i| {
+            const texture_name = json_brush.texture orelse "concrete";
+            const owned_texture = try self.allocator.dupe(u8, texture_name);
+            
             if (std.mem.eql(u8, json_brush.type, "box")) {
-                brush_data[i] = .{ .box = .{
-                    .position = json_brush.position,
-                    .size = json_brush.size.?,
-                }};
+                brush_data[i] = .{ 
+                    .texture = owned_texture,
+                    .data = .{ .box = .{
+                        .position = json_brush.position,
+                        .size = json_brush.size.?,
+                    }},
+                };
             } else if (std.mem.eql(u8, json_brush.type, "slope")) {
-                brush_data[i] = .{ .slope = .{
-                    .position = json_brush.position,
-                    .width = json_brush.width.?,
-                    .height = json_brush.height.?,
-                    .angle = json_brush.angle.?,
-                }};
+                brush_data[i] = .{ 
+                    .texture = owned_texture,
+                    .data = .{ .slope = .{
+                        .position = json_brush.position,
+                        .width = json_brush.width.?,
+                        .height = json_brush.height.?,
+                        .angle = json_brush.angle.?,
+                    }},
+                };
             }
         }
         

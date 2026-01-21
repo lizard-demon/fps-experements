@@ -27,6 +27,7 @@ const Map = struct {
     data: *const map_lib.Data,
     world: World,
     brushes: []brush.Brush,
+    brush_textures: [][]const u8, // Store texture names for each brush
     plane_normals: []Vec3,
     plane_distances: []f32,
     allocator: std.mem.Allocator,
@@ -41,6 +42,7 @@ const Map = struct {
         
         // Allocate storage
         const brushes = try allocator.alloc(brush.Brush, map_data.brushes.len);
+        const brush_textures = try allocator.alloc([]const u8, map_data.brushes.len);
         const plane_normals = try allocator.alloc(Vec3, MAX_PLANES);
         const plane_distances = try allocator.alloc(f32, MAX_PLANES);
         
@@ -52,12 +54,13 @@ const Map = struct {
             
             if (plane_idx + planes_needed > MAX_PLANES) {
                 allocator.free(brushes);
+                allocator.free(brush_textures);
                 allocator.free(plane_normals);
                 allocator.free(plane_distances);
                 return error.TooManyPlanes;
             }
             
-            switch (brush_data) {
+            switch (brush_data.data) {
                 .box => |box| {
                     createBoxBrush(
                         brushes[i..i+1],
@@ -66,6 +69,7 @@ const Map = struct {
                         Vec3.new(box.position[0], box.position[1], box.position[2]),
                         Vec3.new(box.size[0], box.size[1], box.size[2])
                     );
+                    brush_textures[i] = brush_data.texture;
                     plane_idx += 6;
                 },
                 .slope => |slope| {
@@ -78,6 +82,7 @@ const Map = struct {
                         slope.height,
                         slope.angle
                     );
+                    brush_textures[i] = brush_data.texture;
                     plane_idx += 6;
                 },
             }
@@ -86,6 +91,7 @@ const Map = struct {
         // Create world
         const world = World.init(brushes, allocator) catch |err| {
             allocator.free(brushes);
+            allocator.free(brush_textures);
             allocator.free(plane_normals);
             allocator.free(plane_distances);
             return err;
@@ -95,6 +101,7 @@ const Map = struct {
             .data = map_data,
             .world = world,
             .brushes = brushes,
+            .brush_textures = brush_textures,
             .plane_normals = plane_normals,
             .plane_distances = plane_distances,
             .allocator = allocator,
@@ -108,6 +115,7 @@ const Map = struct {
     pub fn deinit(self: *Map) void {
         self.world.deinit();
         self.allocator.free(self.brushes);
+        self.allocator.free(self.brush_textures);
         self.allocator.free(self.plane_normals);
         self.allocator.free(self.plane_distances);
     }
@@ -238,13 +246,18 @@ const Game = struct {
         if (test_map) |map_data| {
             self.map = Map.loadFromMapData(allocator, map_data) catch |err| {
                 std.log.err("Failed to create map from data: {}", .{err});
-                self.createFallbackMap(allocator);
+                self.createFallbackMap(allocator) catch |fallback_err| {
+                    std.log.err("Failed to create fallback map: {}", .{fallback_err});
+                    return;
+                };
                 return;
             };
         } else {
             std.log.err("Map 'test' not found", .{});
-            self.createFallbackMap(allocator);
-            return;
+            self.createFallbackMap(allocator) catch |err| {
+                std.log.err("Failed to create fallback map: {}", .{err});
+                return;
+            };
         }
         
         std.log.info("Loaded map: {s}", .{self.map.data.name});
@@ -258,7 +271,7 @@ const Game = struct {
         }
     }
     
-    fn createFallbackMap(self: *@This(), allocator: std.mem.Allocator) void {
+    fn createFallbackMap(self: *@This(), allocator: std.mem.Allocator) !void {
         // Create a simple ground plane as fallback
         const fallback_brushes = allocator.alloc(map_lib.BrushData, 1) catch {
             std.log.err("Failed to allocate fallback brushes", .{});
@@ -266,10 +279,13 @@ const Game = struct {
         };
         defer allocator.free(fallback_brushes);
         
-        fallback_brushes[0] = .{ .box = .{
-            .position = .{ 0.0, -2.25, 0.0 },
-            .size = .{ 100.0, 4.5, 100.0 }
-        }};
+        fallback_brushes[0] = .{ 
+            .texture = try allocator.dupe(u8, "grass"),
+            .data = .{ .box = .{
+                .position = .{ 0.0, -2.25, 0.0 },
+                .size = .{ 100.0, 4.5, 100.0 },
+            }},
+        };
         
         const fallback_data = map_lib.Data{
             .name = "Fallback Map",
@@ -284,15 +300,13 @@ const Game = struct {
     }
     
     fn buildWorldMesh(self: *@This()) !void {
-        // Use the actual texture file we have: test.rgba
-        const texture_name = "test";
-        
-        // Add brushes to renderer with the test texture
-        for (self.map.brushes) |b| {
+        // Add brushes to renderer with their individual textures
+        for (self.map.brushes, 0..) |b, i| {
+            const texture_name = self.map.brush_textures[i];
             try self.renderer.addBrush(b, .{ 0.8, 0.8, 0.8, 1.0 }, texture_name);
         }
         
-        // Add model with the same texture - handle missing file gracefully
+        // Add model with wood texture - handle missing file gracefully
         const cube_model = model_registry.load("assets/models/cube.obj", "cube") catch |err| blk: {
             std.log.warn("Failed to load cube.obj: {} (continuing without model)", .{err});
             break :blk null;
@@ -301,7 +315,7 @@ const Game = struct {
         if (cube_model) |model| {
             const model_position = Vec3.new(0.0, 5.0, -15.0);
             const model_color = [4]f32{ 1.0, 1.0, 1.0, 1.0 };
-            try self.renderer.addObjModelDirect(model, model_color, model_position, 3.0, texture_name);
+            try self.renderer.addObjModelDirect(model, model_color, model_position, 3.0, "wood");
         }
         
         try self.renderer.buildBuffers();

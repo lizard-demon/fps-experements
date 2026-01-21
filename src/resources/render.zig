@@ -212,12 +212,12 @@ pub fn Renderer(comptime config: Config) type {
             
             const base_vertex = @as(u16, @intCast(self.vertices.items.len));
             
-            // Add vertices
+            // Add vertices with proper UV coordinates
             for (brush_mesh.vertices) |vertex| {
                 try self.vertices.append(self.allocator, .{ 
-                    .pos = .{ vertex.data[0], vertex.data[1], vertex.data[2] }, 
+                    .pos = .{ vertex.position.data[0], vertex.position.data[1], vertex.position.data[2] }, 
                     .col = color,
-                    .uv = .{ 0.0, 0.0 },
+                    .uv = vertex.uv, // Use the calculated UV coordinates
                     .atlas_uv = atlas_info,
                 });
             }
