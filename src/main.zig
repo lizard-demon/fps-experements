@@ -7,8 +7,8 @@ const simgui = sokol.imgui;
 const ig = @import("cimgui");
 
 const math = @import("math");
-const bvh = @import("lib/bvh.zig");
-const brush = @import("lib/brush.zig");
+const bvh = @import("primitives/bvh.zig");
+const brush = @import("primitives/brush.zig");
 const audio_lib = @import("audio");
 const map_lib = @import("maps");
 const models_lib = @import("models");
@@ -209,10 +209,10 @@ const Game = struct {
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.physics = Physics.init(&registry);
+        self.physics = Physics.init(&mixer);
         
         // Initialize renderer with better error handling
-        self.renderer = Renderer.init(allocator, &model_registry) catch |err| {
+        self.renderer = Renderer.init(allocator) catch |err| {
             std.log.err("Failed to initialize renderer: {}", .{err});
             switch (err) {
                 error.NoTexturesFound => {
@@ -227,14 +227,19 @@ const Game = struct {
         };
         
         // Load map from registry
-        if (map_registry.get("test")) |map_data| {
+        const test_map = map_registry.load("assets/maps/test.json", "test") catch |err| blk: {
+            std.log.err("Failed to load test map: {}", .{err});
+            break :blk null;
+        };
+        
+        if (test_map) |map_data| {
             self.map = Map.loadFromMapData(allocator, map_data) catch |err| {
                 std.log.err("Failed to create map from data: {}", .{err});
                 self.createFallbackMap(allocator);
                 return;
             };
         } else {
-            std.log.err("Map 'test' not found in registry", .{});
+            std.log.err("Map 'test' not found", .{});
             self.createFallbackMap(allocator);
             return;
         }
@@ -285,11 +290,16 @@ const Game = struct {
         }
         
         // Add model with the same texture - handle missing file gracefully
-        const model_position = Vec3.new(0.0, 5.0, -15.0);
-        const model_color = [4]f32{ 1.0, 1.0, 1.0, 1.0 };
-        self.renderer.addObjModelAutoScale("cube", model_color, model_position, 3.0, texture_name) catch |err| {
+        const cube_model = model_registry.load("assets/models/cube.obj", "cube") catch |err| blk: {
             std.log.warn("Failed to load cube.obj: {} (continuing without model)", .{err});
+            break :blk null;
         };
+        
+        if (cube_model) |model| {
+            const model_position = Vec3.new(0.0, 5.0, -15.0);
+            const model_color = [4]f32{ 1.0, 1.0, 1.0, 1.0 };
+            try self.renderer.addObjModelDirect(model, model_color, model_position, 3.0, texture_name);
+        }
         
         try self.renderer.buildBuffers();
     }
@@ -308,9 +318,13 @@ const EYE_HEIGHT: f32 = 0.6;
 // Global state
 var game: Game = undefined;
 var initialized: bool = false;
-var registry: audio_lib.Registry = undefined;
+var mixer: audio_lib.Mixer = undefined;
 var map_registry: map_lib.Registry = undefined;
 var model_registry: models_lib.Registry = undefined;
+
+// Audio clips
+var music_audio: ?*const audio_lib.Audio = null;
+var jump_audio: ?*const audio_lib.Audio = null;
 
 export fn init() void {
     const allocator = std.heap.c_allocator;
@@ -318,32 +332,38 @@ export fn init() void {
     saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
     
-    registry = audio_lib.Registry.init(allocator) catch |err| blk: {
-        std.log.err("Failed to load audio registry: {}", .{err});
-        break :blk audio_lib.Registry{
-            .allocator = allocator,
-            .clip_map = std.StringHashMap(usize).init(allocator),
-        };
+    mixer = audio_lib.Mixer.init(allocator);
+    
+    // Load audio files
+    music_audio = mixer.load("assets/audio/music.pcm", 44100) catch |err| blk: {
+        std.log.err("Failed to load music.pcm: {}", .{err});
+        break :blk null;
     };
     
-    map_registry = map_lib.Registry.init(allocator) catch |err| blk: {
-        std.log.err("Failed to load map registry: {}", .{err});
-        break :blk map_lib.Registry{
-            .allocator = allocator,
-            .maps = std.StringHashMap(map_lib.Data).init(allocator),
-        };
+    jump_audio = mixer.load("assets/audio/jump.pcm", 44100) catch |err| blk: {
+        std.log.err("Failed to load jump.pcm: {}", .{err});
+        break :blk null;
     };
     
-    model_registry = models_lib.Registry.init(allocator) catch |err| blk: {
-        std.log.err("Failed to load model registry: {}", .{err});
-        break :blk models_lib.Registry{
-            .allocator = allocator,
-            .meshes = std.StringHashMap(models_lib.Mesh).init(allocator),
-        };
-    };
+    map_registry = map_lib.Registry.init(allocator);
     
-    // Start background music
-    registry.play("music", .{ .loop = true, .volume = 0.3 });
+    model_registry = models_lib.Registry.init(allocator);
+    
+    // Start background music - direct voice assignment
+    if (music_audio) |music| {
+        // Find free voice and assign directly
+        for (&mixer.voices) |*voice| {
+            if (voice.audio == null) {
+                voice.* = audio_lib.Voice{
+                    .audio = music,
+                    .position = 0,
+                    .looping = true,
+                    .volume = 0.3,
+                };
+                break;
+            }
+        }
+    }
     
     game = .{ .allocator = allocator };
     game.init(allocator);
@@ -373,7 +393,7 @@ export fn frame() void {
     const wish_dir = math.wishdir(fwd, right, game.physics.state.yaw);
     
     // Update physics
-    game.physics.update(&game.map.world, wish_dir, game.keys.sp, game.delta_time);
+    game.physics.update(&game.map.world, wish_dir, game.keys.sp, game.delta_time, jump_audio);
     
     // Render
     simgui.newFrame(.{ .width = sapp.width(), .height = sapp.height(), .delta_time = sapp.frameDuration() });
@@ -391,11 +411,13 @@ export fn cleanup() void {
     initialized = false;
     saudio.shutdown();
     
-    // Stop all audio
-    registry.stopAll();
+    // Stop all audio - direct voice clearing
+    for (&mixer.voices) |*voice| {
+        voice.audio = null;
+    }
     
     game.deinit();
-    registry.deinit();
+    mixer.deinit();
     map_registry.deinit();
     model_registry.deinit();
     simgui.shutdown(); 
@@ -454,7 +476,7 @@ fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
     }
     
     for (0..n_usize) |f| {
-        const sample = registry.sample(44100.0);
+        const sample = mixer.sample(44100.0);
         for (0..c_usize) |ch| buf[f * c_usize + ch] = sample;
     }
 }

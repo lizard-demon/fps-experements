@@ -1,7 +1,7 @@
 const std = @import("std");
 const math = @import("math");
-const bvh = @import("../lib/bvh.zig");
-const brush = @import("../lib/brush.zig");
+const bvh = @import("../primitives/bvh.zig");
+const brush = @import("../primitives/brush.zig");
 const audio = @import("audio");
 
 const Vec3 = math.Vec3;
@@ -146,13 +146,13 @@ pub fn Physics(comptime config: Config) type {
         };
         
         state: State = .{},
-        registry: *audio.Registry,
+        mixer: *audio.Mixer,
         
-        pub fn init(registry: *audio.Registry) Self {
-            return Self{ .registry = registry };
+        pub fn init(mixer: *audio.Mixer) Self {
+            return Self{ .mixer = mixer };
         }
         
-        pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
+        pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32, jump_audio: ?*const audio.Audio) void {
             // Apply friction before acceleration
             if (self.state.grounded) self.friction(dt);
             
@@ -160,7 +160,20 @@ pub fn Physics(comptime config: Config) type {
             if (!self.state.grounded) self.state.vel.data[1] -= config.gravity * dt;
             if (jump and self.state.grounded) {
                 self.state.vel.data[1] = config.jump_velocity;
-                self.registry.play("jump", .{});
+                if (jump_audio) |audio_clip| {
+                    // Find free voice and assign directly
+                    for (&self.mixer.voices) |*voice| {
+                        if (voice.audio == null) {
+                            voice.* = audio.Voice{
+                                .audio = audio_clip,
+                                .position = 0,
+                                .looping = false,
+                                .volume = 1.0,
+                            };
+                            break;
+                        }
+                    }
+                }
             }
             
             self.accelerate(wish_dir, dt);

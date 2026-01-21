@@ -6,8 +6,8 @@ const ig = @import("cimgui");
 
 const math = @import("math");
 const shader = @import("shader");
-const bvh = @import("../lib/bvh.zig");
-const brush = @import("../lib/brush.zig");
+const bvh = @import("../primitives/bvh.zig");
+const brush = @import("../primitives/brush.zig");
 const obj = @import("models");
 const texture_lib = @import("texture");
 
@@ -141,17 +141,16 @@ pub fn Renderer(comptime config: Config) type {
         texture_registry: TextureRegistry,
         
         // Model system
-        model_registry: *const obj.Registry,
+        // (removed - models loaded directly)
         
         // Debug stats
         stats: Stats = .{},
         frame_count: u32 = 0,
         
-        pub fn init(allocator: std.mem.Allocator, model_registry: *const obj.Registry) !Self {
+        pub fn init(allocator: std.mem.Allocator) !Self {
             var renderer = Self{ 
                 .allocator = allocator,
                 .texture_registry = try TextureRegistry.init(allocator),
-                .model_registry = model_registry,
             };
             renderer.initPipeline();
             return renderer;
@@ -232,13 +231,7 @@ pub fn Renderer(comptime config: Config) type {
             }
         }
         
-        pub fn addObjModelAutoScale(self: *Self, model_name: []const u8, color: [4]f32, position: Vec3, target_size: f32, texture_name: []const u8) !void {
-            // Get model from registry
-            const mesh = self.model_registry.get(model_name) orelse {
-                std.log.warn("Model '{s}' not found in registry", .{model_name});
-                return;
-            };
-            
+        pub fn addObjModelDirect(self: *Self, mesh: *const obj.Mesh, color: [4]f32, position: Vec3, target_size: f32, texture_name: []const u8) !void {
             // Calculate original bounds
             var bounds_min = Vec3.new(std.math.floatMax(f32), std.math.floatMax(f32), std.math.floatMax(f32));
             var bounds_max = Vec3.new(-std.math.floatMax(f32), -std.math.floatMax(f32), -std.math.floatMax(f32));
