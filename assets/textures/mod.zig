@@ -1,3 +1,6 @@
+// Texture Module - Registry system
+// Usage: const texture = @import("texture");
+
 const std = @import("std");
 const sokol = @import("sokol");
 const sg = sokol.gfx;
@@ -11,13 +14,13 @@ const Vec2 = struct {
     }
 };
 
-pub const AtlasEntry = struct {
+pub const Entry = struct {
     uv_offset: Vec2,
     uv_size: Vec2,
     original_size: Vec2,
 };
 
-pub const TextureInfo = struct {
+pub const Info = struct {
     name: []const u8,
     pixels: []u32,
     width: u32,
@@ -27,36 +30,25 @@ pub const TextureInfo = struct {
     atlas_y: u32 = 0,
 };
 
-pub const TextureRegistry = struct {
+pub const Registry = struct {
     allocator: std.mem.Allocator,
     atlas_texture: sg.Image,
     atlas_view: sg.View,
     atlas_size: u32,
-    texture_map: std.StringHashMap(AtlasEntry),
+    texture_map: std.StringHashMap(Entry),
     
-    const Self = @This();
+    pub fn init(allocator: std.mem.Allocator) !Registry {
+        return Registry.initFromDirectory(allocator, "assets/textures");
+    }
     
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return .{
+    fn initFromDirectory(allocator: std.mem.Allocator, dir_path: []const u8) !Registry {
+        var registry = Registry{
             .allocator = allocator,
             .atlas_texture = .{},
             .atlas_view = .{},
             .atlas_size = 0,
-            .texture_map = std.StringHashMap(AtlasEntry).init(allocator),
+            .texture_map = std.StringHashMap(Entry).init(allocator),
         };
-    }
-    
-    pub fn deinit(self: *Self) void {
-        // Free all stored names
-        var iterator = self.texture_map.iterator();
-        while (iterator.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.texture_map.deinit();
-    }
-    
-    pub fn loadFromDirectory(allocator: std.mem.Allocator, dir_path: []const u8) !Self {
-        var registry = Self.init(allocator);
         
         // Open directory
         var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
@@ -66,7 +58,7 @@ pub const TextureRegistry = struct {
         defer dir.close();
         
         // Collect all .rgba files
-        var textures = std.ArrayListUnmanaged(TextureInfo){};
+        var textures = std.ArrayListUnmanaged(Info){};
         defer {
             for (textures.items) |tex| {
                 allocator.free(tex.name);
@@ -81,7 +73,7 @@ pub const TextureRegistry = struct {
             if (!std.mem.endsWith(u8, entry.name, ".rgba")) continue;
             
             // Load texture file
-            if (loadRGBAFile(allocator, dir, entry.name)) |texture_info| {
+            if (registry.load(allocator, dir, entry.name)) |texture_info| {
                 try textures.append(allocator, texture_info);
                 std.log.info("Loaded texture: {s} ({}x{})", .{ texture_info.name, texture_info.width, texture_info.height });
             } else |err| {
@@ -95,13 +87,23 @@ pub const TextureRegistry = struct {
         }
         
         // Pack textures into atlas
-        try registry.packTextures(textures.items);
+        try registry.pack(textures.items);
         
         std.log.info("Created texture atlas: {}x{} with {} textures", .{ registry.atlas_size, registry.atlas_size, textures.items.len });
         return registry;
     }
     
-    fn loadRGBAFile(allocator: std.mem.Allocator, dir: std.fs.Dir, filename: []const u8) !TextureInfo {
+    pub fn deinit(self: *Registry) void {
+        // Free all stored names
+        var iterator = self.texture_map.iterator();
+        while (iterator.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.texture_map.deinit();
+    }
+    
+    fn load(self: *Registry, allocator: std.mem.Allocator, dir: std.fs.Dir, filename: []const u8) !Info {
+        _ = self;
         const file = try dir.openFile(filename, .{});
         defer file.close();
         
@@ -127,9 +129,7 @@ pub const TextureRegistry = struct {
                 const name_end = std.mem.lastIndexOf(u8, filename, ".") orelse filename.len;
                 const name = try allocator.dupe(u8, filename[0..name_end]);
                 
-                std.log.info("Loaded texture: {s} ({}x{}, {} bytes)", .{ name, size, size, file_size });
-                
-                return TextureInfo{
+                return Info{
                     .name = name,
                     .pixels = pixels,
                     .width = size,
@@ -138,11 +138,10 @@ pub const TextureRegistry = struct {
             }
         }
         
-        std.log.err("Unsupported texture size for {s}: {} bytes (expected square texture)", .{ filename, file_size });
         return error.UnsupportedTextureSize;
     }
     
-    fn packTextures(self: *Self, textures: []TextureInfo) !void {
+    fn pack(self: *Registry, textures: []Info) !void {
         if (textures.len == 0) return;
         
         // Calculate required atlas size
@@ -232,7 +231,7 @@ pub const TextureRegistry = struct {
         self.atlas_size = atlas_size;
     }
     
-    pub fn getAtlasUV(self: *const Self, texture_name: []const u8) [2]f32 {
+    pub fn getAtlasUV(self: *const Registry, texture_name: []const u8) [2]f32 {
         if (self.texture_map.get(texture_name)) |entry| {
             return .{ entry.uv_offset.x, entry.uv_offset.y };
         }
@@ -247,22 +246,5 @@ pub const TextureRegistry = struct {
         
         std.log.err("No textures available at all!", .{});
         return .{ 0.0, 0.0 };
-    }
-    
-    pub fn hasTexture(self: *const Self, texture_name: []const u8) bool {
-        return self.texture_map.contains(texture_name);
-    }
-    
-    pub fn listTextures(self: *const Self) void {
-        std.log.info("Available textures:", .{});
-        var iterator = self.texture_map.iterator();
-        while (iterator.next()) |entry| {
-            const uv = entry.value_ptr;
-            std.log.info("  {s}: UV({d:.3}, {d:.3}) Size({d:.3}, {d:.3})", .{
-                entry.key_ptr.*,
-                uv.uv_offset.x, uv.uv_offset.y,
-                uv.uv_size.x, uv.uv_size.y
-            });
-        }
     }
 };

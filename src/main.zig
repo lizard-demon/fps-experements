@@ -9,8 +9,9 @@ const ig = @import("cimgui");
 const math = @import("math");
 const bvh = @import("lib/bvh.zig");
 const brush = @import("lib/brush.zig");
-const audio_lib = @import("lib/audio.zig");
-const map_lib = @import("lib/map.zig");
+const audio_lib = @import("audio");
+const map_lib = @import("maps");
+const models_lib = @import("models");
 const physics_mod = @import("resources/physics.zig");
 
 const Vec3 = math.Vec3;
@@ -22,7 +23,165 @@ const Physics = physics_mod.Physics(.{});
 const render_mod = @import("resources/render.zig");
 const Renderer = render_mod.Renderer(.{});
 const World = physics_mod.World;
-const Map = map_lib.Map;
+const Map = struct {
+    data: *const map_lib.Data,
+    world: World,
+    brushes: []brush.Brush,
+    plane_normals: []Vec3,
+    plane_distances: []f32,
+    allocator: std.mem.Allocator,
+    
+    const MAX_BRUSHES = 32;
+    const MAX_PLANES = 256;
+    
+    pub fn loadFromMapData(allocator: std.mem.Allocator, map_data: *const map_lib.Data) !Map {
+        if (map_data.brushes.len > MAX_BRUSHES) {
+            return error.TooManyBrushes;
+        }
+        
+        // Allocate storage
+        const brushes = try allocator.alloc(brush.Brush, map_data.brushes.len);
+        const plane_normals = try allocator.alloc(Vec3, MAX_PLANES);
+        const plane_distances = try allocator.alloc(f32, MAX_PLANES);
+        
+        var plane_idx: usize = 0;
+        
+        // Convert brush data to actual brushes
+        for (map_data.brushes, 0..) |brush_data, i| {
+            const planes_needed: usize = 6; // Both box and slope use 6 planes
+            
+            if (plane_idx + planes_needed > MAX_PLANES) {
+                allocator.free(brushes);
+                allocator.free(plane_normals);
+                allocator.free(plane_distances);
+                return error.TooManyPlanes;
+            }
+            
+            switch (brush_data) {
+                .box => |box| {
+                    createBoxBrush(
+                        brushes[i..i+1],
+                        plane_normals[plane_idx..plane_idx + 6],
+                        plane_distances[plane_idx..plane_idx + 6],
+                        Vec3.new(box.position[0], box.position[1], box.position[2]),
+                        Vec3.new(box.size[0], box.size[1], box.size[2])
+                    );
+                    plane_idx += 6;
+                },
+                .slope => |slope| {
+                    createSlopeBrush(
+                        brushes[i..i+1],
+                        plane_normals[plane_idx..plane_idx + 6],
+                        plane_distances[plane_idx..plane_idx + 6],
+                        Vec3.new(slope.position[0], slope.position[1], slope.position[2]),
+                        slope.width,
+                        slope.height,
+                        slope.angle
+                    );
+                    plane_idx += 6;
+                },
+            }
+        }
+        
+        // Create world
+        const world = World.init(brushes, allocator) catch |err| {
+            allocator.free(brushes);
+            allocator.free(plane_normals);
+            allocator.free(plane_distances);
+            return err;
+        };
+        
+        return Map{
+            .data = map_data,
+            .world = world,
+            .brushes = brushes,
+            .plane_normals = plane_normals,
+            .plane_distances = plane_distances,
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn getSpawnPosition(self: *const Map) Vec3 {
+        return self.data.getSpawnPosition();
+    }
+    
+    pub fn deinit(self: *Map) void {
+        self.world.deinit();
+        self.allocator.free(self.brushes);
+        self.allocator.free(self.plane_normals);
+        self.allocator.free(self.plane_distances);
+    }
+    
+    fn createBoxBrush(
+        brushes: []brush.Brush,
+        normals: []Vec3,
+        distances: []f32,
+        center: Vec3,
+        size: Vec3
+    ) void {
+        const half_size = Vec3.scale(size, 0.5);
+        
+        const box_normals = [6]Vec3{
+            Vec3.new( 1,  0,  0), Vec3.new(-1,  0,  0),
+            Vec3.new( 0,  1,  0), Vec3.new( 0, -1,  0),
+            Vec3.new( 0,  0,  1), Vec3.new( 0,  0, -1),
+        };
+        const box_distances = [6]f32{
+            -(center.data[0] + half_size.data[0]), center.data[0] - half_size.data[0],
+            -(center.data[1] + half_size.data[1]), center.data[1] - half_size.data[1],
+            -(center.data[2] + half_size.data[2]), center.data[2] - half_size.data[2],
+        };
+        
+        @memcpy(normals[0..6], &box_normals);
+        @memcpy(distances[0..6], &box_distances);
+        
+        brushes[0] = .{
+            .planes = .{
+                .normals = normals[0..6],
+                .distances = distances[0..6],
+            },
+            .bounds = AABB.new(Vec3.sub(center, half_size), Vec3.add(center, half_size))
+        };
+    }
+    
+    fn createSlopeBrush(
+        brushes: []brush.Brush,
+        normals: []Vec3,
+        distances: []f32,
+        center: Vec3,
+        width: f32,
+        height: f32,
+        angle_degrees: f32
+    ) void {
+        const angle = angle_degrees * (std.math.pi / 180.0);
+        const slope_normal = Vec3.normalize(Vec3.new(0, @cos(angle), -@sin(angle)));
+        const slope_point = Vec3.new(0, height, center.data[2] + width/2);
+        
+        const slope_normals = [6]Vec3{
+            Vec3.new( 0, -1,  0), Vec3.new(-1,  0,  0), Vec3.new( 1,  0,  0),
+            Vec3.new( 0,  0, -1), Vec3.new( 0,  0,  1), slope_normal,
+        };
+        const slope_distances = [6]f32{
+            0.0, -width/2, -width/2,
+            center.data[2] - width/2, -(center.data[2] + width/2),
+            -Vec3.dot(slope_normal, slope_point),
+        };
+        
+        @memcpy(normals[0..6], &slope_normals);
+        @memcpy(distances[0..6], &slope_distances);
+        
+        brushes[0] = .{
+            .planes = .{
+                .normals = normals[0..6],
+                .distances = distances[0..6],
+            },
+            .bounds = AABB.new(
+                Vec3.new(-width/2, 0.0, center.data[2] - width/2),
+                Vec3.new(width/2, height, center.data[2] + width/2)
+            )
+        };
+    }
+};
 
 // Game state
 const Game = struct {
@@ -50,10 +209,10 @@ const Game = struct {
     
     fn init(self: *@This(), allocator: std.mem.Allocator) void {
         self.allocator = allocator;
-        self.physics = Physics.init(&mixer);
+        self.physics = Physics.init(&registry);
         
         // Initialize renderer with better error handling
-        self.renderer = Renderer.init(allocator) catch |err| {
+        self.renderer = Renderer.init(allocator, &model_registry) catch |err| {
             std.log.err("Failed to initialize renderer: {}", .{err});
             switch (err) {
                 error.NoTexturesFound => {
@@ -67,13 +226,18 @@ const Game = struct {
             std.process.exit(1);
         };
         
-        // Load map from JSON file
-        self.map = Map.loadFromFile(allocator, "assets/game/map/test.json") catch |err| {
-            std.log.err("Failed to load map: {}", .{err});
-            // Create a minimal fallback map
+        // Load map from registry
+        if (map_registry.get("test")) |map_data| {
+            self.map = Map.loadFromMapData(allocator, map_data) catch |err| {
+                std.log.err("Failed to create map from data: {}", .{err});
+                self.createFallbackMap(allocator);
+                return;
+            };
+        } else {
+            std.log.err("Map 'test' not found in registry", .{});
             self.createFallbackMap(allocator);
             return;
-        };
+        }
         
         std.log.info("Loaded map: {s}", .{self.map.data.name});
         std.log.info("Created {} brushes", .{self.map.brushes.len});
@@ -99,13 +263,13 @@ const Game = struct {
             .size = .{ 100.0, 4.5, 100.0 }
         }};
         
-        const fallback_data = map_lib.MapData{
+        const fallback_data = map_lib.Data{
             .name = "Fallback Map",
             .spawn_position = .{ 0.0, 3.0, 0.0 },
             .brushes = fallback_brushes,
         };
         
-        self.map = Map.loadFromData(allocator, fallback_data) catch |err| {
+        self.map = Map.loadFromMapData(allocator, &fallback_data) catch |err| {
             std.log.err("Failed to create fallback map: {}", .{err});
             return;
         };
@@ -123,7 +287,7 @@ const Game = struct {
         // Add model with the same texture - handle missing file gracefully
         const model_position = Vec3.new(0.0, 5.0, -15.0);
         const model_color = [4]f32{ 1.0, 1.0, 1.0, 1.0 };
-        self.renderer.addObjModelAutoScale("assets/cube.obj", model_color, model_position, 3.0, texture_name) catch |err| {
+        self.renderer.addObjModelAutoScale("cube", model_color, model_position, 3.0, texture_name) catch |err| {
             std.log.warn("Failed to load cube.obj: {} (continuing without model)", .{err});
         };
         
@@ -144,8 +308,9 @@ const EYE_HEIGHT: f32 = 0.6;
 // Global state
 var game: Game = undefined;
 var initialized: bool = false;
-var mixer: audio_lib.Mixer = undefined;
-var background_music: ?*audio_lib.Audio = null;
+var registry: audio_lib.Registry = undefined;
+var map_registry: map_lib.Registry = undefined;
+var model_registry: models_lib.Registry = undefined;
 
 export fn init() void {
     const allocator = std.heap.c_allocator;
@@ -153,23 +318,32 @@ export fn init() void {
     saudio.setup(.{ .stream_cb = audio });
     simgui.setup(.{});
     
-    mixer = audio_lib.Mixer.init(allocator);
-    
-    // Load and start background music
-    background_music = mixer.load("assets/game/music.pcm", 44100) catch |err| blk: {
-        std.log.err("Failed to load background music: {}", .{err});
-        break :blk null;
+    registry = audio_lib.Registry.init(allocator) catch |err| blk: {
+        std.log.err("Failed to load audio registry: {}", .{err});
+        break :blk audio_lib.Registry{
+            .allocator = allocator,
+            .clip_map = std.StringHashMap(usize).init(allocator),
+        };
     };
     
-    if (background_music) |music| {
-        // Find free voice and start looping music
-        for (&mixer.voices) |*voice| {
-            if (voice.audio == null) {
-                voice.* = .{ .audio = music, .looping = true, .volume = 0.3 };
-                break;
-            }
-        }
-    }
+    map_registry = map_lib.Registry.init(allocator) catch |err| blk: {
+        std.log.err("Failed to load map registry: {}", .{err});
+        break :blk map_lib.Registry{
+            .allocator = allocator,
+            .maps = std.StringHashMap(map_lib.Data).init(allocator),
+        };
+    };
+    
+    model_registry = models_lib.Registry.init(allocator) catch |err| blk: {
+        std.log.err("Failed to load model registry: {}", .{err});
+        break :blk models_lib.Registry{
+            .allocator = allocator,
+            .meshes = std.StringHashMap(models_lib.Mesh).init(allocator),
+        };
+    };
+    
+    // Start background music
+    registry.play("music", .{ .loop = true, .volume = 0.3 });
     
     game = .{ .allocator = allocator };
     game.init(allocator);
@@ -217,15 +391,13 @@ export fn cleanup() void {
     initialized = false;
     saudio.shutdown();
     
-    // Stop background music by clearing voices
-    for (&mixer.voices) |*voice| {
-        if (voice.audio == background_music) {
-            voice.audio = null;
-        }
-    }
+    // Stop all audio
+    registry.stopAll();
     
     game.deinit();
-    mixer.deinit();
+    registry.deinit();
+    map_registry.deinit();
+    model_registry.deinit();
     simgui.shutdown(); 
     sg.shutdown();
 }
@@ -282,7 +454,7 @@ fn audio(buf: [*c]f32, n: i32, c: i32) callconv(.c) void {
     }
     
     for (0..n_usize) |f| {
-        const sample = mixer.sample(44100.0);
+        const sample = registry.sample(44100.0);
         for (0..c_usize) |ch| buf[f * c_usize + ch] = sample;
     }
 }

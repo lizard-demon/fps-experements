@@ -34,11 +34,48 @@ pub fn build(b: *Build) !void {
         },
     });
 
+    // Create texture module
+    const texture_mod = b.addModule("texture", .{
+        .root_source_file = b.path("assets/textures/mod.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "sokol", .module = dep_sokol.module("sokol") },
+        },
+    });
+
+    // Create audio module
+    const audio_mod = b.addModule("audio", .{
+        .root_source_file = b.path("assets/audio/mod.zig"),
+        .target = target,
+    });
+
+    // Create maps module
+    const maps_mod = b.addModule("maps", .{
+        .root_source_file = b.path("assets/maps/mod.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "math", .module = math_mod },
+        },
+    });
+
+    // Create models module
+    const models_mod = b.addModule("models", .{
+        .root_source_file = b.path("assets/models/mod.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "math", .module = math_mod },
+        },
+    });
+
     const mod = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "sokol", .module = dep_sokol.module("sokol") },
         .{ .name = cimgui_conf.module_name, .module = dep_cimgui.module(cimgui_conf.module_name) },
         .{ .name = "math", .module = math_mod },
         .{ .name = "shader", .module = shader_mod },
+        .{ .name = "texture", .module = texture_mod },
+        .{ .name = "audio", .module = audio_mod },
+        .{ .name = "maps", .module = maps_mod },
+        .{ .name = "models", .module = models_mod },
     } });
 
     const opts = buildOpts{ .mod = mod, .dep_sokol = dep_sokol, .dep_cimgui = dep_cimgui, .cimgui_clib_name = cimgui_conf.clib_name, .shader = shader };

@@ -2,7 +2,7 @@ const std = @import("std");
 const math = @import("math");
 const bvh = @import("../lib/bvh.zig");
 const brush = @import("../lib/brush.zig");
-const audio = @import("../lib/audio.zig");
+const audio = @import("audio");
 
 const Vec3 = math.Vec3;
 
@@ -146,17 +146,10 @@ pub fn Physics(comptime config: Config) type {
         };
         
         state: State = .{},
-        jump_sound: ?*const audio.Audio = null,
-        mixer: *audio.Mixer,
+        registry: *audio.Registry,
         
-        pub fn init(mixer: *audio.Mixer) Self {
-            var self = Self{ .mixer = mixer };
-            // Load jump sound
-            self.jump_sound = mixer.load("assets/player/jump.pcm", 44100) catch |err| blk: {
-                std.log.err("Failed to load jump sound: {}", .{err});
-                break :blk null;
-            };
-            return self;
+        pub fn init(registry: *audio.Registry) Self {
+            return Self{ .registry = registry };
         }
         
         pub fn update(self: *Self, world: *World, wish_dir: Vec3, jump: bool, dt: f32) void {
@@ -167,15 +160,7 @@ pub fn Physics(comptime config: Config) type {
             if (!self.state.grounded) self.state.vel.data[1] -= config.gravity * dt;
             if (jump and self.state.grounded) {
                 self.state.vel.data[1] = config.jump_velocity;
-                if (self.jump_sound) |sound| {
-                    // Find free voice and play jump sound
-                    for (&self.mixer.voices) |*voice| {
-                        if (voice.audio == null) {
-                            voice.* = .{ .audio = sound, .volume = 1.0 };
-                            break;
-                        }
-                    }
-                }
+                self.registry.play("jump", .{});
             }
             
             self.accelerate(wish_dir, dt);
