@@ -226,6 +226,9 @@ const Game = struct {
             std.process.exit(1);
         };
         
+        // List available textures for debugging
+        self.renderer.texture_registry.listTextures();
+        
         // Load map from registry
         const test_map = map_registry.load("assets/maps/test.json", "test") catch |err| blk: {
             std.log.err("Failed to load test map: {}", .{err});

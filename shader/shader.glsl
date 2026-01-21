@@ -3,21 +3,21 @@
 
 @vs vs
 layout(binding = 0) uniform vs_params { mat4 mvp; };
-in vec4 position; in vec4 color0; in vec2 texcoord0; in vec2 atlas_uv;
-out vec4 color; out vec3 world_pos; out vec2 uv; out vec2 atlas_offset;
+in vec4 position; in vec4 color0; in vec2 texcoord0; in vec4 atlas_info;
+out vec4 color; out vec3 world_pos; out vec2 uv; out vec4 atlas_data;
 void main() {
     gl_Position = mvp * position;
     world_pos = position.xyz;
     color = color0;
     uv = texcoord0;
-    atlas_offset = atlas_uv;
+    atlas_data = atlas_info; // [offset_x, offset_y, size_x, size_y]
 }
 @end
 
 @fs fs
 layout(binding = 0) uniform texture2D atlas;
 layout(binding = 0) uniform sampler smp;
-in vec4 color; in vec3 world_pos; in vec2 uv; in vec2 atlas_offset;
+in vec4 color; in vec3 world_pos; in vec2 uv; in vec4 atlas_data;
 out vec4 frag_color;
 
 void main() {
@@ -29,8 +29,15 @@ void main() {
         (abs(n.y) > 0.5) ? world_pos.xz * 0.25 : 
         world_pos.xy * 0.25;
     
-    // Sample from texture atlas using atlas offset
-    vec2 atlas_coord = fract(tex_uv) * 0.25 + atlas_offset; // 0.25 = 1/4 for 4x4 atlas
+    // Sample from texture atlas using proper bounds
+    // atlas_data = [offset_x, offset_y, size_x, size_y]
+    vec2 atlas_offset = atlas_data.xy;
+    vec2 atlas_size = atlas_data.zw;
+    
+    // Clamp UV to [0,1] and scale to texture size within atlas
+    vec2 clamped_uv = clamp(fract(tex_uv), 0.0, 1.0);
+    vec2 atlas_coord = atlas_offset + clamped_uv * atlas_size;
+    
     vec4 tex_color = texture(sampler2D(atlas, smp), atlas_coord);
     
     // Subtle grid effect

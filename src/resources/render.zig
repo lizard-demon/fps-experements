@@ -42,7 +42,7 @@ const Vertex = extern struct {
     pos: [3]f32, 
     col: [4]f32, 
     uv: [2]f32,
-    atlas_uv: [2]f32,
+    atlas_uv: [4]f32, // Now stores offset + size: [x, y, width, height]
 };
 
 // Render batch for efficient drawing
@@ -177,7 +177,7 @@ pub fn Renderer(comptime config: Config) type {
             layout.attrs[0].format = .FLOAT3; // position
             layout.attrs[1].format = .FLOAT4; // color
             layout.attrs[2].format = .FLOAT2; // uv
-            layout.attrs[3].format = .FLOAT2; // atlas_uv
+            layout.attrs[3].format = .FLOAT4; // atlas_uv (offset + size)
             
             self.pipeline = sg.makePipeline(.{ 
                 .shader = sg.makeShader(shader.shaderShaderDesc(sg.queryBackend())), 
@@ -201,7 +201,7 @@ pub fn Renderer(comptime config: Config) type {
         }
         
         pub fn addBrush(self: *Self, b: brush.Brush, color: [4]f32, texture_name: []const u8) !void {
-            const atlas_uv = self.texture_registry.getAtlasUV(texture_name);
+            const atlas_info = self.texture_registry.getAtlasUV(texture_name);
             const index_offset = @as(u32, @intCast(self.indices.items.len));
             
             // Generate mesh from brush
@@ -218,7 +218,7 @@ pub fn Renderer(comptime config: Config) type {
                     .pos = .{ vertex.data[0], vertex.data[1], vertex.data[2] }, 
                     .col = color,
                     .uv = .{ 0.0, 0.0 },
-                    .atlas_uv = atlas_uv,
+                    .atlas_uv = atlas_info,
                 });
             }
             
@@ -261,7 +261,7 @@ pub fn Renderer(comptime config: Config) type {
             const transform = Mat4.mul(Mat4.mul(translate_to_position, scale_transform), center_to_origin);
             
             // Apply transform and add to renderer
-            const atlas_uv = self.texture_registry.getAtlasUV(texture_name);
+            const atlas_info = self.texture_registry.getAtlasUV(texture_name);
             const index_offset = @as(u32, @intCast(self.indices.items.len));
             const base_vertex = @as(u16, @intCast(self.vertices.items.len));
             
@@ -278,7 +278,7 @@ pub fn Renderer(comptime config: Config) type {
                     .pos = .{ transformed.data[0], transformed.data[1], transformed.data[2] }, 
                     .col = color,
                     .uv = .{ 0.0, 0.0 },
-                    .atlas_uv = atlas_uv,
+                    .atlas_uv = atlas_info,
                 });
             }
             
